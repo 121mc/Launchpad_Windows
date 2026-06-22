@@ -39,6 +39,11 @@ public sealed record HotkeyGesture(bool Control, bool Alt, bool Shift, bool Wind
             }
             else
             {
+                if (key is not null)
+                {
+                    return false;
+                }
+
                 key = NormalizeKey(part);
             }
         }

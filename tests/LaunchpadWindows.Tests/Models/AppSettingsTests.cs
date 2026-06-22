@@ -54,4 +54,15 @@ public sealed class AppSettingsTests
         Assert.False(gesture.Alt);
         Assert.Equal("L", gesture.Key);
     }
+
+    [Theory]
+    [InlineData("Ctrl + L + K")]
+    [InlineData("Ctrl + Foo + L")]
+    public void TryParse_RejectsMultipleKeyTokens(string text)
+    {
+        bool parsed = HotkeyGesture.TryParse(text, out HotkeyGesture? gesture);
+
+        Assert.False(parsed);
+        Assert.Null(gesture);
+    }
 }
