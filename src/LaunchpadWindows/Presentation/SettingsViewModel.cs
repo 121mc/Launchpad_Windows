@@ -198,12 +198,21 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         {
             return _shortcutResolver.Resolve(pathOrUrl).TargetPath;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or COMException)
+        catch (Exception ex) when (IsResolverFailure(ex))
         {
             ErrorMessage = $"Unable to resolve shortcut target: {ex.Message}";
             return null;
         }
     }
+
+    private static bool IsResolverFailure(Exception ex) =>
+        ex is IOException
+            or UnauthorizedAccessException
+            or COMException
+            or InvalidOperationException
+            or NotSupportedException
+            or System.Reflection.TargetInvocationException
+            or MemberAccessException;
 
     private static bool HasModifier(HotkeyGesture gesture) =>
         gesture.Control || gesture.Alt || gesture.Shift || gesture.Windows;

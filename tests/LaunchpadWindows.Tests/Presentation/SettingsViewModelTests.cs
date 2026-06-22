@@ -41,6 +41,30 @@ public sealed class SettingsViewModelTests
     }
 
     [Fact]
+    public void AddManualShortcut_WhenResolverThrowsExpectedFailure_PreservesManualItemAndRaisesSave()
+    {
+        AppSettings settings = AppSettings.CreateDefault();
+        SettingsViewModel vm = new(
+            settings,
+            new FakeAutostart(),
+            @"C:\Users\hp\Desktop",
+            [],
+            shortcutResolver: new ThrowingShortcutResolver(new InvalidOperationException("bad shortcut")));
+        int saves = 0;
+        vm.SaveRequested += (_, _) => saves++;
+
+        Exception? exception = Record.Exception(() =>
+            vm.AddManualItem("Bad Shortcut", LaunchItemKind.Shortcut, @"C:\Users\hp\Desktop\Bad.lnk"));
+
+        Assert.Null(exception);
+        Assert.Single(settings.ManualItems);
+        Assert.Single(vm.ManualItems);
+        Assert.Null(settings.ManualItems[0].ResolvedTargetPath);
+        Assert.Contains("bad shortcut", vm.ErrorMessage);
+        Assert.Equal(1, saves);
+    }
+
+    [Fact]
     public void AddManualUrl_StoresResolvedUrl()
     {
         AppSettings settings = AppSettings.CreateDefault();
@@ -168,5 +192,10 @@ public sealed class SettingsViewModelTests
     private sealed class FakeShortcutResolver(string? targetPath) : IShortcutResolver
     {
         public ShortcutResolution Resolve(string shortcutPath) => new(targetPath);
+    }
+
+    private sealed class ThrowingShortcutResolver(Exception exception) : IShortcutResolver
+    {
+        public ShortcutResolution Resolve(string shortcutPath) => throw exception;
     }
 }
