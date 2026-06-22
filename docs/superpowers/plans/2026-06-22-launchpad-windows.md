@@ -81,15 +81,14 @@ Create or modify these files:
 Run:
 
 ```powershell
-dotnet new sln -n LaunchpadWindows
-dotnet new wpf -n LaunchpadWindows -o src/LaunchpadWindows -f net10.0-windows
-dotnet new xunit -n LaunchpadWindows.Tests -o tests/LaunchpadWindows.Tests -f net10.0-windows
+dotnet new sln -n LaunchpadWindows --format sln
+dotnet new wpf -n LaunchpadWindows -o src/LaunchpadWindows -f net10.0
+dotnet new xunit -n LaunchpadWindows.Tests -o tests/LaunchpadWindows.Tests -f net10.0
 dotnet sln LaunchpadWindows.sln add src/LaunchpadWindows/LaunchpadWindows.csproj
 dotnet sln LaunchpadWindows.sln add tests/LaunchpadWindows.Tests/LaunchpadWindows.Tests.csproj
-dotnet add tests/LaunchpadWindows.Tests/LaunchpadWindows.Tests.csproj reference src/LaunchpadWindows/LaunchpadWindows.csproj
 ```
 
-Expected: both projects are created and added to the solution.
+Expected: `LaunchpadWindows.sln` is created, both projects are created, and both projects are added to the solution. The WPF template emits `net10.0-windows`; the xUnit template emits `net10.0` and is replaced in Step 3 before adding the project reference.
 
 - [ ] **Step 2: Pin the SDK**
 
@@ -104,7 +103,7 @@ Create `global.json`:
 }
 ```
 
-- [ ] **Step 3: Replace the WPF project file**
+- [ ] **Step 3: Replace the project files**
 
 Replace `src/LaunchpadWindows/LaunchpadWindows.csproj`:
 
@@ -122,6 +121,45 @@ Replace `src/LaunchpadWindows/LaunchpadWindows.csproj`:
   </PropertyGroup>
 </Project>
 ```
+
+Replace `tests/LaunchpadWindows.Tests/LaunchpadWindows.Tests.csproj`:
+
+```xml
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.4">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+</Project>
+```
+
+Then add the app project reference after both project files target `net10.0-windows`:
+
+```powershell
+dotnet add tests/LaunchpadWindows.Tests/LaunchpadWindows.Tests.csproj reference src/LaunchpadWindows/LaunchpadWindows.csproj
+```
+
+Expected: reference is added without target framework incompatibility errors.
 
 - [ ] **Step 4: Replace the generated app entry**
 
@@ -143,7 +181,7 @@ using System.Windows;
 
 namespace LaunchpadWindows;
 
-public partial class App : Application
+public partial class App : System.Windows.Application
 {
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -1165,10 +1203,32 @@ public sealed class AutostartServiceTests
         Assert.False(runKey.Values.ContainsKey("LaunchpadWindows"));
     }
 
-    private sealed class FakeRunKey : IRunKey
+    [Fact]
+    public void SetEnabled_ReturnsFailureWhenRunKeyWriteFails()
+    {
+        FakeRunKey runKey = new(throwOnSet: true);
+        AutostartService service = new(runKey, () => @"C:\Apps\LaunchpadWindows.exe");
+
+        AutostartResult result = service.SetEnabled(true);
+
+        Assert.False(result.Success);
+        Assert.Contains("registry denied", result.Message);
+        Assert.Empty(runKey.Values);
+    }
+
+    private sealed class FakeRunKey(bool throwOnSet = false) : IRunKey
     {
         public Dictionary<string, string> Values { get; } = [];
-        public void SetValue(string name, string value) => Values[name] = value;
+        public void SetValue(string name, string value)
+        {
+            if (throwOnSet)
+            {
+                throw new UnauthorizedAccessException("registry denied");
+            }
+
+            Values[name] = value;
+        }
+
         public void DeleteValue(string name) => Values.Remove(name);
     }
 }
@@ -1211,7 +1271,12 @@ public sealed class RegistryRunKey : IRunKey
 
     public void SetValue(string name, string value)
     {
-        using RegistryKey key = Registry.CurrentUser.CreateSubKey(RunPath, writable: true);
+        using RegistryKey? key = Registry.CurrentUser.CreateSubKey(RunPath, writable: true);
+        if (key is null)
+        {
+            throw new InvalidOperationException("Unable to open HKCU Run key.");
+        }
+
         key.SetValue(name, value);
     }
 
@@ -1249,7 +1314,7 @@ public sealed class AutostartService
 
             return AutostartResult.Ok();
         }
-        catch (UnauthorizedAccessException ex)
+        catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException or IOException or InvalidOperationException)
         {
             return AutostartResult.Fail(ex.Message);
         }
@@ -1960,7 +2025,12 @@ public sealed class RegistryRunKey : IRunKey
 
     public void SetValue(string name, string value)
     {
-        using RegistryKey key = Registry.CurrentUser.CreateSubKey(RunPath, writable: true);
+        using RegistryKey? key = Registry.CurrentUser.CreateSubKey(RunPath, writable: true);
+        if (key is null)
+        {
+            throw new InvalidOperationException("Unable to open HKCU Run key.");
+        }
+
         key.SetValue(name, value);
     }
 
@@ -1998,7 +2068,7 @@ public sealed class AutostartService : IAutostartService
 
             return AutostartResult.Ok();
         }
-        catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException)
+        catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException or IOException or InvalidOperationException)
         {
             return AutostartResult.Fail(ex.Message);
         }
@@ -2240,6 +2310,18 @@ public static class AcrylicWindowHelper
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(nint hwnd, int attribute, ref int attributeValue, int attributeSize);
 
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmExtendFrameIntoClientArea(nint hwnd, ref Margins margins);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Margins
+    {
+        public int Left;
+        public int Right;
+        public int Top;
+        public int Bottom;
+    }
+
     public static void Apply(Window window)
     {
         nint hwnd = new WindowInteropHelper(window).Handle;
@@ -2253,6 +2335,9 @@ public static class AcrylicWindowHelper
 
         int backdrop = DwmSystemBackdropTransientWindow;
         DwmSetWindowAttribute(hwnd, DwmwaSystemBackdropType, ref backdrop, sizeof(int));
+
+        Margins margins = new() { Left = -1, Right = -1, Top = -1, Bottom = -1 };
+        DwmExtendFrameIntoClientArea(hwnd, ref margins);
     }
 }
 ```
@@ -2270,8 +2355,7 @@ Create `src/LaunchpadWindows/Presentation/LaunchpadWindow.xaml`:
         ResizeMode="NoResize"
         Topmost="True"
         ShowInTaskbar="False"
-        AllowsTransparency="True"
-        Background="#99000000"
+        Background="Transparent"
         Opacity="0"
         KeyDown="OnKeyDown">
     <Window.Resources>
@@ -2284,7 +2368,7 @@ Create `src/LaunchpadWindows/Presentation/LaunchpadWindow.xaml`:
             <Setter Property="Foreground" Value="White" />
         </Style>
     </Window.Resources>
-    <Grid x:Name="BackgroundSurface" Background="Transparent" MouseDown="OnWindowMouseDown">
+    <Grid x:Name="BackgroundSurface" Background="#66000000" MouseDown="OnWindowMouseDown">
         <ItemsControl x:Name="ItemsHost" ItemsSource="{Binding Items}" HorizontalAlignment="Center" VerticalAlignment="Center">
             <ItemsControl.ItemsPanel>
                 <ItemsPanelTemplate>
@@ -2307,7 +2391,21 @@ Create `src/LaunchpadWindows/Presentation/LaunchpadWindow.xaml`:
                 </DataTemplate>
             </ItemsControl.ItemTemplate>
         </ItemsControl>
-        <TextBlock Text="{Binding ErrorMessage}" Foreground="White" Background="#CC000000" Padding="12,8" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,48" />
+        <TextBlock Text="{Binding ErrorMessage}" Foreground="White" Background="#CC000000" Padding="12,8" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,48">
+            <TextBlock.Style>
+                <Style TargetType="TextBlock">
+                    <Setter Property="Visibility" Value="Visible" />
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding ErrorMessage}" Value="{x:Null}">
+                            <Setter Property="Visibility" Value="Collapsed" />
+                        </DataTrigger>
+                        <DataTrigger Binding="{Binding ErrorMessage}" Value="">
+                            <Setter Property="Visibility" Value="Collapsed" />
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </TextBlock.Style>
+        </TextBlock>
     </Grid>
 </Window>
 ```
@@ -2603,17 +2701,48 @@ git commit -m "feat: add launchpad and settings windows"
 Create `src/LaunchpadWindows/SystemIntegration/MonitorService.cs`:
 
 ```csharp
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Forms;
+using DrawingPoint = System.Drawing.Point;
 
 namespace LaunchpadWindows.SystemIntegration;
 
 public sealed class MonitorService
 {
+    private const int MdtEffectiveDpi = 0;
+    private const uint MonitorDefaultToNearest = 2;
+
+    [DllImport("user32.dll")]
+    private static extern nint MonitorFromPoint(DrawingPoint point, uint flags);
+
+    [DllImport("shcore.dll")]
+    private static extern int GetDpiForMonitor(nint monitor, int dpiType, out uint dpiX, out uint dpiY);
+
     public Rect GetMouseMonitorBounds()
     {
-        Screen screen = Screen.FromPoint(Cursor.Position);
-        return new Rect(screen.Bounds.Left, screen.Bounds.Top, screen.Bounds.Width, screen.Bounds.Height);
+        DrawingPoint cursor = Cursor.Position;
+        Screen screen = Screen.FromPoint(cursor);
+        (double scaleX, double scaleY) = GetMonitorScale(cursor);
+        return new Rect(
+            screen.Bounds.Left / scaleX,
+            screen.Bounds.Top / scaleY,
+            screen.Bounds.Width / scaleX,
+            screen.Bounds.Height / scaleY);
+    }
+
+    private static (double ScaleX, double ScaleY) GetMonitorScale(DrawingPoint point)
+    {
+        nint monitor = MonitorFromPoint(point, MonitorDefaultToNearest);
+        if (monitor != nint.Zero &&
+            GetDpiForMonitor(monitor, MdtEffectiveDpi, out uint dpiX, out uint dpiY) == 0 &&
+            dpiX > 0 &&
+            dpiY > 0)
+        {
+            return (dpiX / 96.0, dpiY / 96.0);
+        }
+
+        return (1.0, 1.0);
     }
 }
 ```
@@ -2679,7 +2808,7 @@ using LaunchpadWindows.SystemIntegration;
 
 namespace LaunchpadWindows;
 
-public partial class App : Application
+public partial class App : System.Windows.Application
 {
     private JsonSettingsStore _settingsStore = null!;
     private AppSettings _settings = null!;
