@@ -15,7 +15,7 @@ public sealed class LaunchpadViewModel : INotifyPropertyChanged
     public LaunchpadViewModel(ILauncher launcher)
     {
         _launcher = launcher;
-        LaunchCommand = new RelayCommand(parameter => Launch((LaunchItem)parameter!));
+        LaunchCommand = new RelayCommand(LaunchIfPossible, parameter => parameter is LaunchItem);
         CloseCommand = new RelayCommand(_ => RequestClose());
     }
 
@@ -43,6 +43,7 @@ public sealed class LaunchpadViewModel : INotifyPropertyChanged
 
     public void SetItems(IEnumerable<LaunchItem> items)
     {
+        ErrorMessage = null;
         Items.Clear();
         foreach (LaunchItem item in items)
         {
@@ -61,11 +62,20 @@ public sealed class LaunchpadViewModel : INotifyPropertyChanged
         OrderChanged?.Invoke(this, Items.Select(item => item.Id).ToArray());
     }
 
+    private void LaunchIfPossible(object? parameter)
+    {
+        if (parameter is LaunchItem item)
+        {
+            Launch(item);
+        }
+    }
+
     private void Launch(LaunchItem item)
     {
         LaunchResult result = _launcher.Launch(item);
         if (result.Success)
         {
+            ErrorMessage = null;
             RequestClose();
         }
         else
