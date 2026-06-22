@@ -218,6 +218,19 @@ public sealed class AppSettingsTests
         Assert.Equal(LaunchItemSource.Manual, item.Source);
         Assert.Equal("Notes", item.DisplayName);
     }
+
+    [Fact]
+    public void TryParse_AcceptsEditableHotkeyText()
+    {
+        bool parsed = HotkeyGesture.TryParse("Ctrl + Shift + L", out HotkeyGesture? gesture);
+
+        Assert.True(parsed);
+        Assert.NotNull(gesture);
+        Assert.True(gesture.Control);
+        Assert.True(gesture.Shift);
+        Assert.False(gesture.Alt);
+        Assert.Equal("L", gesture.Key);
+    }
 }
 ```
 
@@ -242,6 +255,54 @@ public sealed record HotkeyGesture(bool Control, bool Alt, bool Shift, bool Wind
 {
     public static HotkeyGesture Default { get; } = new(Control: true, Alt: true, Shift: false, Windows: false, Key: "Space");
 
+    public static bool TryParse(string text, out HotkeyGesture? gesture)
+    {
+        gesture = null;
+        string[] parts = text.Split('+', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 0)
+        {
+            return false;
+        }
+
+        bool control = false;
+        bool alt = false;
+        bool shift = false;
+        bool windows = false;
+        string? key = null;
+
+        foreach (string part in parts)
+        {
+            if (part.Equals("Ctrl", StringComparison.OrdinalIgnoreCase) || part.Equals("Control", StringComparison.OrdinalIgnoreCase))
+            {
+                control = true;
+            }
+            else if (part.Equals("Alt", StringComparison.OrdinalIgnoreCase))
+            {
+                alt = true;
+            }
+            else if (part.Equals("Shift", StringComparison.OrdinalIgnoreCase))
+            {
+                shift = true;
+            }
+            else if (part.Equals("Win", StringComparison.OrdinalIgnoreCase) || part.Equals("Windows", StringComparison.OrdinalIgnoreCase))
+            {
+                windows = true;
+            }
+            else
+            {
+                key = NormalizeKey(part);
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            return false;
+        }
+
+        gesture = new HotkeyGesture(control, alt, shift, windows, key);
+        return true;
+    }
+
     public override string ToString()
     {
         List<string> parts = [];
@@ -251,6 +312,14 @@ public sealed record HotkeyGesture(bool Control, bool Alt, bool Shift, bool Wind
         if (Windows) parts.Add("Win");
         parts.Add(Key);
         return string.Join(" + ", parts);
+    }
+
+    private static string NormalizeKey(string key)
+    {
+        string trimmed = key.Trim();
+        return trimmed.Length == 1
+            ? trimmed.ToUpperInvariant()
+            : char.ToUpperInvariant(trimmed[0]) + trimmed[1..];
     }
 }
 ```
@@ -307,6 +376,8 @@ public sealed class AppSettings
     public TimeSpan FadeDuration { get; set; } = TimeSpan.FromMilliseconds(180);
     public double SettingsWindowWidth { get; set; } = 720;
     public double SettingsWindowHeight { get; set; } = 520;
+    public double? SettingsWindowLeft { get; set; }
+    public double? SettingsWindowTop { get; set; }
 
     public static AppSettings CreateDefault() => new();
 }
@@ -532,11 +603,11 @@ public sealed class DesktopScannerTests
 
         IReadOnlyList<LaunchItem> items = scanner.Scan(@"C:\Users\hp\Desktop", DateTimeOffset.Parse("2026-06-22T00:00:00Z"));
 
-        Assert.Collection(items,
-            item => Assert.Equal(LaunchItemKind.Shortcut, item.Kind),
-            item => Assert.Equal(LaunchItemKind.Url, item.Kind),
-            item => Assert.Equal(LaunchItemKind.Folder, item.Kind),
-            item => Assert.Equal(LaunchItemKind.File, item.Kind));
+        Dictionary<string, LaunchItemKind> kinds = items.ToDictionary(item => item.DisplayName, item => item.Kind);
+        Assert.Equal(LaunchItemKind.Shortcut, kinds["App"]);
+        Assert.Equal(LaunchItemKind.Url, kinds["Web"]);
+        Assert.Equal(LaunchItemKind.Folder, kinds["Docs"]);
+        Assert.Equal(LaunchItemKind.File, kinds["note.txt"]);
         Assert.All(items, item => Assert.StartsWith("desktop:", item.Id));
     }
 
@@ -581,6 +652,7 @@ Expected: compile fails because scanner types do not exist.
 Create `src/LaunchpadWindows/Desktop/DesktopScanner.cs`:
 
 ```csharp
+using System.Runtime.InteropServices;
 using LaunchpadWindows.Models;
 using LaunchpadWindows.Shortcuts;
 
@@ -623,9 +695,18 @@ public sealed class DesktopScanner
                     ? LaunchItemKind.Url
                     : LaunchItemKind.File;
 
-        ShortcutResolution? resolution = kind is LaunchItemKind.Shortcut or LaunchItemKind.Url
-            ? _shortcutResolver.Resolve(entry.FullPath)
-            : null;
+        ShortcutResolution? resolution = null;
+        if (kind is LaunchItemKind.Shortcut or LaunchItemKind.Url)
+        {
+            try
+            {
+                resolution = _shortcutResolver.Resolve(entry.FullPath);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or COMException)
+            {
+                resolution = new ShortcutResolution(null);
+            }
+        }
 
         string displayName = kind is LaunchItemKind.Shortcut or LaunchItemKind.Url
             ? Path.GetFileNameWithoutExtension(entry.Name)
@@ -686,9 +767,16 @@ public sealed class ShellShortcutResolver : IShortcutResolver
     {
         if (Path.GetExtension(shortcutPath).Equals(".url", StringComparison.OrdinalIgnoreCase))
         {
-            string? url = File.ReadLines(shortcutPath)
-                .FirstOrDefault(line => line.StartsWith("URL=", StringComparison.OrdinalIgnoreCase));
-            return new ShortcutResolution(url is null ? null : url[4..]);
+            try
+            {
+                string? url = File.ReadLines(shortcutPath)
+                    .FirstOrDefault(line => line.StartsWith("URL=", StringComparison.OrdinalIgnoreCase));
+                return new ShortcutResolution(url is null ? null : url[4..]);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return new ShortcutResolution(null);
+            }
         }
 
         Type? shellType = Type.GetTypeFromProgID("WScript.Shell");
@@ -904,6 +992,28 @@ public sealed class LauncherServiceTests
         Assert.Equal(@"C:\file.txt", starter.StartedPaths.Single());
     }
 
+    [Fact]
+    public void Launch_ReturnsFailureWhenShortcutTargetIsMissing()
+    {
+        FakeProcessStarter starter = new();
+        LauncherService service = new(starter, path => path.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase), path => false);
+        LaunchItem item = new(
+            "desktop:broken",
+            "Broken",
+            LaunchItemSource.DesktopScan,
+            LaunchItemKind.Shortcut,
+            @"C:\Users\hp\Desktop\Broken.lnk",
+            @"C:\missing-target.exe",
+            "Broken.lnk",
+            DateTimeOffset.UtcNow);
+
+        LaunchResult result = service.Launch(item);
+
+        Assert.False(result.Success);
+        Assert.Contains("Shortcut target does not exist", result.Message);
+        Assert.Empty(starter.StartedPaths);
+    }
+
     private sealed class FakeProcessStarter : IProcessStarter
     {
         public List<string> StartedPaths { get; } = [];
@@ -966,6 +1076,14 @@ public sealed class LauncherService
 
     public LaunchResult Launch(LaunchItem item)
     {
+        if (item.Kind == LaunchItemKind.Shortcut &&
+            !string.IsNullOrWhiteSpace(item.ResolvedTargetPath) &&
+            !_fileExists(item.ResolvedTargetPath) &&
+            !_directoryExists(item.ResolvedTargetPath))
+        {
+            return LaunchResult.Fail($"Shortcut target does not exist: {item.ResolvedTargetPath}");
+        }
+
         if (item.Kind != LaunchItemKind.Url && !_fileExists(item.PathOrUrl) && !_directoryExists(item.PathOrUrl))
         {
             return LaunchResult.Fail($"Path does not exist: {item.PathOrUrl}");
@@ -1183,7 +1301,7 @@ public sealed class HotkeyServiceTests
     [Fact]
     public void Register_ReturnsConflictWhenNativeRegistrationFails()
     {
-        FakeHotkeyRegistrar registrar = new(registerResult: false);
+        FakeHotkeyRegistrar registrar = new(false);
         HotkeyService service = new(registrar);
 
         HotkeyRegistrationResult result = service.Register(nint.Zero, HotkeyGesture.Default);
@@ -1195,7 +1313,7 @@ public sealed class HotkeyServiceTests
     [Fact]
     public void HandleHotkeyMessage_RaisesActivated()
     {
-        FakeHotkeyRegistrar registrar = new(registerResult: true);
+        FakeHotkeyRegistrar registrar = new(true);
         HotkeyService service = new(registrar);
         int activations = 0;
         service.Activated += (_, _) => activations++;
@@ -1206,10 +1324,38 @@ public sealed class HotkeyServiceTests
         Assert.Equal(1, activations);
     }
 
-    private sealed class FakeHotkeyRegistrar(bool registerResult) : IHotkeyRegistrar
+    [Fact]
+    public void Register_RestoresPreviousHotkeyWhenNewRegistrationFails()
     {
-        public bool Register(nint windowHandle, int id, HotkeyModifiers modifiers, int virtualKey) => registerResult;
-        public void Unregister(nint windowHandle, int id) { }
+        FakeHotkeyRegistrar registrar = new(true, false, true);
+        HotkeyService service = new(registrar);
+        service.Register((nint)123, HotkeyGesture.Default);
+
+        HotkeyRegistrationResult result = service.Register((nint)123, new HotkeyGesture(Control: true, Alt: true, Shift: false, Windows: false, Key: "L"));
+
+        Assert.False(result.Success);
+        Assert.Equal(3, registrar.RegisterCount);
+        Assert.Equal(1, registrar.UnregisterCount);
+    }
+
+    private sealed class FakeHotkeyRegistrar(params bool[] registerResults) : IHotkeyRegistrar
+    {
+        private int _nextResult;
+        public int RegisterCount { get; private set; }
+        public int UnregisterCount { get; private set; }
+
+        public bool Register(nint windowHandle, int id, HotkeyModifiers modifiers, int virtualKey)
+        {
+            RegisterCount++;
+            bool result = registerResults[Math.Min(_nextResult, registerResults.Length - 1)];
+            _nextResult++;
+            return result;
+        }
+
+        public void Unregister(nint windowHandle, int id)
+        {
+            UnregisterCount++;
+        }
     }
 }
 ```
@@ -1248,6 +1394,7 @@ public sealed record HotkeyRegistrationResult(bool Success, string Message)
 {
     public static HotkeyRegistrationResult Ok() => new(true, "");
     public static HotkeyRegistrationResult Conflict() => new(false, "Hotkey is unavailable.");
+    public static HotkeyRegistrationResult Invalid(string key) => new(false, $"Unsupported hotkey key: {key}");
 }
 
 public interface IHotkeyRegistrar
@@ -1277,6 +1424,7 @@ public sealed class HotkeyService
 
     private readonly IHotkeyRegistrar _registrar;
     private nint _windowHandle;
+    private HotkeyGesture? _registeredGesture;
 
     public HotkeyService(IHotkeyRegistrar registrar)
     {
@@ -1287,17 +1435,27 @@ public sealed class HotkeyService
 
     public HotkeyRegistrationResult Register(nint windowHandle, HotkeyGesture gesture)
     {
-        _windowHandle = windowHandle;
-        HotkeyModifiers modifiers = 0;
-        if (gesture.Control) modifiers |= HotkeyModifiers.Control;
-        if (gesture.Alt) modifiers |= HotkeyModifiers.Alt;
-        if (gesture.Shift) modifiers |= HotkeyModifiers.Shift;
-        if (gesture.Windows) modifiers |= HotkeyModifiers.Windows;
+        if (!TryBuildRegistration(gesture, out HotkeyModifiers modifiers, out int virtualKey))
+        {
+            return HotkeyRegistrationResult.Invalid(gesture.Key);
+        }
 
-        int virtualKey = KeyInterop.VirtualKeyFromKey(Enum.Parse<Key>(gesture.Key));
-        return _registrar.Register(windowHandle, DefaultHotkeyId, modifiers, virtualKey)
-            ? HotkeyRegistrationResult.Ok()
-            : HotkeyRegistrationResult.Conflict();
+        nint previousHandle = _windowHandle;
+        HotkeyGesture? previousGesture = _registeredGesture;
+        if (_windowHandle != nint.Zero)
+        {
+            _registrar.Unregister(_windowHandle, DefaultHotkeyId);
+        }
+
+        if (_registrar.Register(windowHandle, DefaultHotkeyId, modifiers, virtualKey))
+        {
+            _windowHandle = windowHandle;
+            _registeredGesture = gesture;
+            return HotkeyRegistrationResult.Ok();
+        }
+
+        RestorePreviousRegistration(previousHandle, previousGesture);
+        return HotkeyRegistrationResult.Conflict();
     }
 
     public void Unregister()
@@ -1305,6 +1463,8 @@ public sealed class HotkeyService
         if (_windowHandle != nint.Zero)
         {
             _registrar.Unregister(_windowHandle, DefaultHotkeyId);
+            _windowHandle = nint.Zero;
+            _registeredGesture = null;
         }
     }
 
@@ -1314,6 +1474,40 @@ public sealed class HotkeyService
         {
             Activated?.Invoke(this, EventArgs.Empty);
         }
+    }
+
+    private void RestorePreviousRegistration(nint previousHandle, HotkeyGesture? previousGesture)
+    {
+        if (previousHandle == nint.Zero || previousGesture is null)
+        {
+            _windowHandle = nint.Zero;
+            _registeredGesture = null;
+            return;
+        }
+
+        if (TryBuildRegistration(previousGesture, out HotkeyModifiers modifiers, out int virtualKey) &&
+            _registrar.Register(previousHandle, DefaultHotkeyId, modifiers, virtualKey))
+        {
+            _windowHandle = previousHandle;
+            _registeredGesture = previousGesture;
+        }
+    }
+
+    private static bool TryBuildRegistration(HotkeyGesture gesture, out HotkeyModifiers modifiers, out int virtualKey)
+    {
+        modifiers = 0;
+        virtualKey = 0;
+        if (!Enum.TryParse(gesture.Key, ignoreCase: true, out Key key))
+        {
+            return false;
+        }
+
+        if (gesture.Control) modifiers |= HotkeyModifiers.Control;
+        if (gesture.Alt) modifiers |= HotkeyModifiers.Alt;
+        if (gesture.Shift) modifiers |= HotkeyModifiers.Shift;
+        if (gesture.Windows) modifiers |= HotkeyModifiers.Windows;
+        virtualKey = KeyInterop.VirtualKeyFromKey(key);
+        return virtualKey != 0;
     }
 }
 ```
@@ -1408,14 +1602,73 @@ public sealed class LaunchpadViewModelTests
 Modify `src/LaunchpadWindows/Shell/LauncherService.cs` by adding the interface and implementing it:
 
 ```csharp
+using System.Diagnostics;
+using LaunchpadWindows.Models;
+
+namespace LaunchpadWindows.Shell;
+
+public sealed record LaunchResult(bool Success, string Message)
+{
+    public static LaunchResult Ok() => new(true, "");
+    public static LaunchResult Fail(string message) => new(false, message);
+}
+
+public interface IProcessStarter
+{
+    void Start(string pathOrUrl);
+}
+
 public interface ILauncher
 {
     LaunchResult Launch(LaunchItem item);
 }
 
+public sealed class ShellProcessStarter : IProcessStarter
+{
+    public void Start(string pathOrUrl)
+    {
+        Process.Start(new ProcessStartInfo(pathOrUrl) { UseShellExecute = true });
+    }
+}
+
 public sealed class LauncherService : ILauncher
 {
-    // keep the existing constructor and Launch method body
+    private readonly IProcessStarter _processStarter;
+    private readonly Func<string, bool> _fileExists;
+    private readonly Func<string, bool> _directoryExists;
+
+    public LauncherService(IProcessStarter processStarter, Func<string, bool>? fileExists = null, Func<string, bool>? directoryExists = null)
+    {
+        _processStarter = processStarter;
+        _fileExists = fileExists ?? File.Exists;
+        _directoryExists = directoryExists ?? Directory.Exists;
+    }
+
+    public LaunchResult Launch(LaunchItem item)
+    {
+        if (item.Kind == LaunchItemKind.Shortcut &&
+            !string.IsNullOrWhiteSpace(item.ResolvedTargetPath) &&
+            !_fileExists(item.ResolvedTargetPath) &&
+            !_directoryExists(item.ResolvedTargetPath))
+        {
+            return LaunchResult.Fail($"Shortcut target does not exist: {item.ResolvedTargetPath}");
+        }
+
+        if (item.Kind != LaunchItemKind.Url && !_fileExists(item.PathOrUrl) && !_directoryExists(item.PathOrUrl))
+        {
+            return LaunchResult.Fail($"Path does not exist: {item.PathOrUrl}");
+        }
+
+        try
+        {
+            _processStarter.Start(item.PathOrUrl);
+            return LaunchResult.Ok();
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            return LaunchResult.Fail(ex.Message);
+        }
+    }
 }
 ```
 
@@ -1605,6 +1858,51 @@ public sealed class SettingsViewModelTests
     }
 
     [Fact]
+    public void ToggleAutostart_LeavesSettingFalseWhenRegistryWriteFails()
+    {
+        AppSettings settings = AppSettings.CreateDefault();
+        SettingsViewModel vm = new(settings, new FakeAutostart(success: false), @"C:\Users\hp\Desktop", []);
+
+        vm.SetAutostart(true);
+
+        Assert.False(settings.AutostartEnabled);
+        Assert.Equal("registry denied", vm.ErrorMessage);
+    }
+
+    [Fact]
+    public void SetHotkeyText_UpdatesSettingWhenRegistrationSucceeds()
+    {
+        AppSettings settings = AppSettings.CreateDefault();
+        SettingsViewModel vm = new(
+            settings,
+            new FakeAutostart(),
+            @"C:\Users\hp\Desktop",
+            [],
+            gesture => HotkeyRegistrationResult.Ok());
+        int saves = 0;
+        vm.SaveRequested += (_, _) => saves++;
+
+        vm.SetHotkeyText("Ctrl + Shift + L");
+
+        Assert.Equal("Ctrl + Shift + L", settings.Hotkey.ToString());
+        Assert.Equal(1, saves);
+    }
+
+    [Fact]
+    public void SaveWindowBounds_PersistsSettingsGeometry()
+    {
+        AppSettings settings = AppSettings.CreateDefault();
+        SettingsViewModel vm = new(settings, new FakeAutostart(), @"C:\Users\hp\Desktop", []);
+
+        vm.SaveWindowBounds(left: 100, top: 80, width: 900, height: 640);
+
+        Assert.Equal(100, settings.SettingsWindowLeft);
+        Assert.Equal(80, settings.SettingsWindowTop);
+        Assert.Equal(900, settings.SettingsWindowWidth);
+        Assert.Equal(640, settings.SettingsWindowHeight);
+    }
+
+    [Fact]
     public void HideAndRestoreDesktopItem_UpdatesCollectionsAndSettings()
     {
         LaunchItem item = new("desktop:A", "A", LaunchItemSource.DesktopScan, LaunchItemKind.File, @"C:\Users\hp\Desktop\A.txt", null, "A", DateTimeOffset.UtcNow);
@@ -1622,9 +1920,10 @@ public sealed class SettingsViewModelTests
         Assert.Empty(settings.HiddenDesktopItemIds);
     }
 
-    private sealed class FakeAutostart : IAutostartService
+    private sealed class FakeAutostart(bool success = true) : IAutostartService
     {
-        public AutostartResult SetEnabled(bool enabled) => AutostartResult.Ok();
+        public AutostartResult SetEnabled(bool enabled) =>
+            success ? AutostartResult.Ok() : AutostartResult.Fail("registry denied");
     }
 }
 ```
@@ -1634,14 +1933,78 @@ public sealed class SettingsViewModelTests
 Modify `src/LaunchpadWindows/SystemIntegration/AutostartService.cs`:
 
 ```csharp
+using Microsoft.Win32;
+
+namespace LaunchpadWindows.SystemIntegration;
+
+public sealed record AutostartResult(bool Success, string Message)
+{
+    public static AutostartResult Ok() => new(true, "");
+    public static AutostartResult Fail(string message) => new(false, message);
+}
+
+public interface IRunKey
+{
+    void SetValue(string name, string value);
+    void DeleteValue(string name);
+}
+
 public interface IAutostartService
 {
     AutostartResult SetEnabled(bool enabled);
 }
 
+public sealed class RegistryRunKey : IRunKey
+{
+    private const string RunPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
+
+    public void SetValue(string name, string value)
+    {
+        using RegistryKey key = Registry.CurrentUser.CreateSubKey(RunPath, writable: true);
+        key.SetValue(name, value);
+    }
+
+    public void DeleteValue(string name)
+    {
+        using RegistryKey? key = Registry.CurrentUser.OpenSubKey(RunPath, writable: true);
+        key?.DeleteValue(name, throwOnMissingValue: false);
+    }
+}
+
 public sealed class AutostartService : IAutostartService
 {
-    // keep the existing constructor and SetEnabled method body
+    private const string RunValueName = "LaunchpadWindows";
+    private readonly IRunKey _runKey;
+    private readonly Func<string> _executablePathProvider;
+
+    public AutostartService(IRunKey runKey, Func<string> executablePathProvider)
+    {
+        _runKey = runKey;
+        _executablePathProvider = executablePathProvider;
+    }
+
+    public AutostartResult SetEnabled(bool enabled)
+    {
+        try
+        {
+            if (enabled)
+            {
+                _runKey.SetValue(RunValueName, Quote(_executablePathProvider()));
+            }
+            else
+            {
+                _runKey.DeleteValue(RunValueName);
+            }
+
+            return AutostartResult.Ok();
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            return AutostartResult.Fail(ex.Message);
+        }
+    }
+
+    private static string Quote(string path) => $"\"{path}\"";
 }
 ```
 
@@ -1661,21 +2024,32 @@ Create `src/LaunchpadWindows/Presentation/SettingsViewModel.cs`:
 
 ```csharp
 using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Runtime.CompilerServices;
+using System.Windows.Input;
 using LaunchpadWindows.Models;
 using LaunchpadWindows.SystemIntegration;
 
 namespace LaunchpadWindows.Presentation;
 
-public sealed class SettingsViewModel
+public sealed class SettingsViewModel : INotifyPropertyChanged
 {
     private readonly AppSettings _settings;
     private readonly IAutostartService _autostartService;
+    private readonly Func<HotkeyGesture, HotkeyRegistrationResult> _hotkeyUpdater;
     private readonly List<LaunchItem> _allDesktopItems;
+    private string? _errorMessage;
 
-    public SettingsViewModel(AppSettings settings, IAutostartService autostartService, string desktopPath, IReadOnlyList<LaunchItem> desktopItems)
+    public SettingsViewModel(
+        AppSettings settings,
+        IAutostartService autostartService,
+        string desktopPath,
+        IReadOnlyList<LaunchItem> desktopItems,
+        Func<HotkeyGesture, HotkeyRegistrationResult>? hotkeyUpdater = null)
     {
         _settings = settings;
         _autostartService = autostartService;
+        _hotkeyUpdater = hotkeyUpdater ?? (_ => HotkeyRegistrationResult.Ok());
         _allDesktopItems = desktopItems.ToList();
         DesktopPath = desktopPath;
         foreach (LaunchItem item in settings.ManualItems)
@@ -1696,11 +2070,26 @@ public sealed class SettingsViewModel
 
     public string DesktopPath { get; }
     public string HotkeyText => _settings.Hotkey.ToString();
+    public bool AutostartEnabled => _settings.AutostartEnabled;
+    public double SettingsWindowWidth => _settings.SettingsWindowWidth;
+    public double SettingsWindowHeight => _settings.SettingsWindowHeight;
+    public double? SettingsWindowLeft => _settings.SettingsWindowLeft;
+    public double? SettingsWindowTop => _settings.SettingsWindowTop;
     public ObservableCollection<LaunchItem> ManualItems { get; } = [];
     public ObservableCollection<LaunchItem> VisibleDesktopItems { get; } = [];
     public ObservableCollection<string> HiddenDesktopItemIds { get; } = [];
-    public string? ErrorMessage { get; private set; }
+    public string? ErrorMessage
+    {
+        get => _errorMessage;
+        private set
+        {
+            _errorMessage = value;
+            OnPropertyChanged();
+        }
+    }
+
     public event EventHandler? SaveRequested;
+    public event PropertyChangedEventHandler? PropertyChanged;
 
     public void AddManualItem(string displayName, LaunchItemKind kind, string pathOrUrl)
     {
@@ -1748,6 +2137,29 @@ public sealed class SettingsViewModel
         SaveRequested?.Invoke(this, EventArgs.Empty);
     }
 
+    public void SetHotkeyText(string text)
+    {
+        if (!HotkeyGesture.TryParse(text, out HotkeyGesture? gesture) ||
+            gesture is null ||
+            !Enum.TryParse<Key>(gesture.Key, ignoreCase: true, out _))
+        {
+            ErrorMessage = "Enter a hotkey such as Ctrl + Alt + Space.";
+            return;
+        }
+
+        HotkeyRegistrationResult result = _hotkeyUpdater(gesture);
+        if (!result.Success)
+        {
+            ErrorMessage = result.Message;
+            return;
+        }
+
+        _settings.Hotkey = gesture;
+        ErrorMessage = null;
+        OnPropertyChanged(nameof(HotkeyText));
+        SaveRequested?.Invoke(this, EventArgs.Empty);
+    }
+
     public void SetAutostart(bool enabled)
     {
         AutostartResult result = _autostartService.SetEnabled(enabled);
@@ -1755,6 +2167,7 @@ public sealed class SettingsViewModel
         {
             _settings.AutostartEnabled = enabled;
             ErrorMessage = null;
+            OnPropertyChanged(nameof(AutostartEnabled));
             SaveRequested?.Invoke(this, EventArgs.Empty);
         }
         else
@@ -1762,6 +2175,18 @@ public sealed class SettingsViewModel
             ErrorMessage = result.Message;
         }
     }
+
+    public void SaveWindowBounds(double left, double top, double width, double height)
+    {
+        _settings.SettingsWindowLeft = left;
+        _settings.SettingsWindowTop = top;
+        _settings.SettingsWindowWidth = width;
+        _settings.SettingsWindowHeight = height;
+        SaveRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void OnPropertyChanged([CallerMemberName] string? propertyName = null) =>
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
 }
 ```
 
@@ -1843,6 +2268,7 @@ Create `src/LaunchpadWindows/Presentation/LaunchpadWindow.xaml`:
         xmlns:models="clr-namespace:LaunchpadWindows.Models"
         WindowStyle="None"
         ResizeMode="NoResize"
+        Topmost="True"
         ShowInTaskbar="False"
         AllowsTransparency="True"
         Background="#99000000"
@@ -1875,7 +2301,7 @@ Create `src/LaunchpadWindows/Presentation/LaunchpadWindow.xaml`:
                             Drop="OnItemDrop">
                         <StackPanel>
                             <Border Width="72" Height="72" CornerRadius="18" Background="#33FFFFFF" HorizontalAlignment="Center" />
-                            <TextBlock Text="{Binding DisplayName}" Margin="0,10,0,0" TextAlignment="Center" TextWrapping="Wrap" MaxHeight="38" />
+                            <TextBlock Text="{Binding DisplayName}" Margin="0,10,0,0" TextAlignment="Center" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" LineHeight="18" MaxHeight="36" />
                         </StackPanel>
                     </Button>
                 </DataTemplate>
@@ -1900,10 +2326,12 @@ namespace LaunchpadWindows.Presentation;
 
 public partial class LaunchpadWindow : Window
 {
+    private readonly TimeSpan _fadeDuration;
     private LaunchpadViewModel ViewModel => (LaunchpadViewModel)DataContext;
 
-    public LaunchpadWindow(LaunchpadViewModel viewModel)
+    public LaunchpadWindow(LaunchpadViewModel viewModel, TimeSpan fadeDuration)
     {
+        _fadeDuration = fadeDuration;
         InitializeComponent();
         DataContext = viewModel;
         Loaded += (_, _) =>
@@ -1915,14 +2343,14 @@ public partial class LaunchpadWindow : Window
 
     public void FadeOutAndClose()
     {
-        DoubleAnimation animation = new(0.0, TimeSpan.FromMilliseconds(180));
+        DoubleAnimation animation = new(0.0, _fadeDuration);
         animation.Completed += (_, _) => Close();
         BeginAnimation(OpacityProperty, animation);
     }
 
     private void FadeTo(double opacity)
     {
-        BeginAnimation(OpacityProperty, new DoubleAnimation(opacity, TimeSpan.FromMilliseconds(180)));
+        BeginAnimation(OpacityProperty, new DoubleAnimation(opacity, _fadeDuration));
     }
 
     private void OnKeyDown(object sender, KeyEventArgs e)
@@ -1985,22 +2413,32 @@ Create `src/LaunchpadWindows/Presentation/SettingsWindow.xaml`:
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
         <StackPanel Orientation="Horizontal">
             <TextBlock Text="Hotkey" FontWeight="SemiBold" Width="120" />
-            <TextBlock Text="{Binding HotkeyText}" />
+            <TextBox x:Name="HotkeyTextBox" Text="{Binding HotkeyText, Mode=OneWay}" Width="220" />
+            <Button Content="Apply" Width="80" Margin="8,0,0,0" Click="OnApplyHotkeyClick" />
         </StackPanel>
-        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,16,0,0">
-            <TextBlock Text="Desktop" FontWeight="SemiBold" Width="120" />
-            <TextBlock Text="{Binding DesktopPath}" />
-        </StackPanel>
+        <CheckBox x:Name="AutostartCheckBox"
+                  Grid.Row="1"
+                  Content="Start at login"
+                  IsChecked="{Binding AutostartEnabled, Mode=OneWay}"
+                  Margin="120,16,0,0"
+                  Click="OnAutostartClick" />
         <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,16,0,0">
+            <TextBlock Text="Desktop" FontWeight="SemiBold" Width="120" />
+            <TextBlock Text="{Binding DesktopPath}" TextTrimming="CharacterEllipsis" />
+        </StackPanel>
+        <TextBlock Grid.Row="3" Text="{Binding ErrorMessage}" Foreground="#B00020" Margin="120,12,0,0" />
+        <StackPanel Grid.Row="4" Orientation="Horizontal" Margin="0,16,0,0">
             <Button Content="Add File Or Shortcut" Width="150" Click="OnAddFileClick" />
             <Button Content="Add Folder" Width="110" Margin="8,0,0,0" Click="OnAddFolderClick" />
             <Button Content="Remove Manual" Width="130" Margin="8,0,0,0" Click="OnRemoveManualClick" />
         </StackPanel>
-        <TabControl Grid.Row="3" Margin="0,20,0,0">
+        <TabControl Grid.Row="5" Margin="0,20,0,0">
             <TabItem Header="Manual Items">
                 <ListBox x:Name="ManualItemsList" ItemsSource="{Binding ManualItems}" DisplayMemberPath="DisplayName" />
             </TabItem>
@@ -2026,6 +2464,7 @@ Create `src/LaunchpadWindows/Presentation/SettingsWindow.xaml.cs`:
 ```csharp
 using LaunchpadWindows.Models;
 using Microsoft.Win32;
+using System.ComponentModel;
 using System.Windows;
 using Forms = System.Windows.Forms;
 
@@ -2039,6 +2478,28 @@ public partial class SettingsWindow : Window
     {
         InitializeComponent();
         DataContext = viewModel;
+        Width = viewModel.SettingsWindowWidth;
+        Height = viewModel.SettingsWindowHeight;
+        if (viewModel.SettingsWindowLeft.HasValue && viewModel.SettingsWindowTop.HasValue)
+        {
+            WindowStartupLocation = WindowStartupLocation.Manual;
+            Left = viewModel.SettingsWindowLeft.Value;
+            Top = viewModel.SettingsWindowTop.Value;
+        }
+
+        Closing += OnClosing;
+    }
+
+    private void OnApplyHotkeyClick(object sender, RoutedEventArgs e)
+    {
+        ViewModel.SetHotkeyText(HotkeyTextBox.Text);
+        HotkeyTextBox.Text = ViewModel.HotkeyText;
+    }
+
+    private void OnAutostartClick(object sender, RoutedEventArgs e)
+    {
+        ViewModel.SetAutostart(AutostartCheckBox.IsChecked == true);
+        AutostartCheckBox.IsChecked = ViewModel.AutostartEnabled;
     }
 
     private void OnAddFileClick(object sender, RoutedEventArgs e)
@@ -2100,6 +2561,11 @@ public partial class SettingsWindow : Window
         {
             ViewModel.RestoreHiddenDesktopItem(itemId);
         }
+    }
+
+    private void OnClosing(object? sender, CancelEventArgs e)
+    {
+        ViewModel.SaveWindowBounds(Left, Top, ActualWidth, ActualHeight);
     }
 }
 ```
@@ -2200,6 +2666,7 @@ Replace `src/LaunchpadWindows/App.xaml.cs`:
 
 ```csharp
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Interop;
 using LaunchpadWindows.Desktop;
@@ -2271,8 +2738,7 @@ public partial class App : Application
     private void OpenLaunchpad()
     {
         string desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
-        DesktopScanner scanner = new(new FileSystemDesktopReader(), new ShellShortcutResolver());
-        IReadOnlyList<LaunchItem> scanned = scanner.Scan(desktopPath, DateTimeOffset.UtcNow);
+        IReadOnlyList<LaunchItem> scanned = ScanDesktopOrReport(desktopPath);
         IReadOnlyList<LaunchItem> items = ItemMerger.Merge(_settings, scanned);
         _settingsStore.SaveAsync(_settings).GetAwaiter().GetResult();
 
@@ -2286,7 +2752,7 @@ public partial class App : Application
         };
 
         Rect bounds = new MonitorService().GetMouseMonitorBounds();
-        _launchpadWindow = new LaunchpadWindow(viewModel)
+        _launchpadWindow = new LaunchpadWindow(viewModel, _settings.FadeDuration)
         {
             Left = bounds.Left,
             Top = bounds.Top,
@@ -2301,11 +2767,39 @@ public partial class App : Application
     {
         string desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
         string executablePath = Environment.ProcessPath ?? Assembly.GetExecutingAssembly().Location;
-        DesktopScanner scanner = new(new FileSystemDesktopReader(), new ShellShortcutResolver());
-        IReadOnlyList<LaunchItem> scanned = scanner.Scan(desktopPath, DateTimeOffset.UtcNow);
-        SettingsViewModel viewModel = new(_settings, new AutostartService(new RegistryRunKey(), () => executablePath), desktopPath, scanned);
+        IReadOnlyList<LaunchItem> scanned = ScanDesktopOrReport(desktopPath);
+        SettingsViewModel viewModel = new(
+            _settings,
+            new AutostartService(new RegistryRunKey(), () => executablePath),
+            desktopPath,
+            scanned,
+            RegisterHotkeyFromSettings);
         viewModel.SaveRequested += (_, _) => _settingsStore.SaveAsync(_settings).GetAwaiter().GetResult();
         new SettingsWindow(viewModel).Show();
+    }
+
+    private IReadOnlyList<LaunchItem> ScanDesktopOrReport(string desktopPath)
+    {
+        try
+        {
+            DesktopScanner scanner = new(new FileSystemDesktopReader(), new ShellShortcutResolver());
+            return scanner.Scan(desktopPath, DateTimeOffset.UtcNow);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or COMException)
+        {
+            _tray.ShowMessage("Launchpad Windows", $"Desktop scan failed: {ex.Message}");
+            return [];
+        }
+    }
+
+    private HotkeyRegistrationResult RegisterHotkeyFromSettings(HotkeyGesture gesture)
+    {
+        HotkeyRegistrationResult result = _hotkey.Register(_messageSource.Handle, gesture);
+        if (!result.Success)
+        {
+            _tray.ShowMessage("Launchpad Windows", result.Message);
+        }
+        return result;
     }
 }
 ```
@@ -2372,12 +2866,12 @@ public sealed class IconProvider
         public string szTypeName;
     }
 
-    public ImageSource? GetIcon(string path)
+    public ImageSource GetIcon(string path)
     {
         nint result = SHGetFileInfo(path, 0, out Shfileinfo info, (uint)Marshal.SizeOf<Shfileinfo>(), ShgfiIcon | ShgfiLargeIcon);
         if (result == nint.Zero || info.hIcon == nint.Zero)
         {
-            return null;
+            return GetFallbackIcon();
         }
 
         try
@@ -2389,7 +2883,7 @@ public sealed class IconProvider
         }
         catch
         {
-            return null;
+            return GetFallbackIcon();
         }
         finally
         {
@@ -2398,6 +2892,14 @@ public sealed class IconProvider
                 DestroyIcon(info.hIcon);
             }
         }
+    }
+
+    private static ImageSource GetFallbackIcon()
+    {
+        return System.Windows.Interop.Imaging.CreateBitmapSourceFromHIcon(
+            System.Drawing.SystemIcons.Application.Handle,
+            System.Windows.Int32Rect.Empty,
+            BitmapSizeOptions.FromWidthAndHeight(64, 64));
     }
 }
 ```
@@ -2425,8 +2927,8 @@ public sealed class LaunchItemIconConverter : IValueConverter
             return null;
         }
 
-        ImageSource? icon = IconProvider.GetIcon(item.PathOrUrl);
-        icon?.Freeze();
+        ImageSource icon = IconProvider.GetIcon(item.PathOrUrl);
+        icon.Freeze();
         return icon;
     }
 
@@ -2466,11 +2968,11 @@ Replace the tile `StackPanel`:
     <Border Width="72" Height="72" CornerRadius="18" Background="#33FFFFFF" HorizontalAlignment="Center">
         <Image Source="{Binding Converter={StaticResource LaunchItemIconConverter}}" Width="54" Height="54" HorizontalAlignment="Center" VerticalAlignment="Center" />
     </Border>
-    <TextBlock Text="{Binding DisplayName}" Margin="0,10,0,0" TextAlignment="Center" TextWrapping="Wrap" MaxHeight="38" />
+    <TextBlock Text="{Binding DisplayName}" Margin="0,10,0,0" TextAlignment="Center" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" LineHeight="18" MaxHeight="36" />
 </StackPanel>
 ```
 
-The fixed `Border` preserves tile layout even when icon extraction returns `null`.
+The fixed `Border` preserves tile layout, and `IconProvider` returns the standard application icon when shell icon extraction fails.
 
 - [ ] **Step 4: Build and run visual smoke test**
 
@@ -2524,29 +3026,50 @@ Expected:
 - `Ctrl + Alt + Space` opens the launchpad;
 - pressing `Esc` closes the launchpad with fade-out.
 
-- [ ] **Step 3: Verify desktop scan**
+- [ ] **Step 3: Verify current-user Desktop scan**
 
-Create four temporary entries on the current user's Desktop:
+Create temporary entries on the current user's Desktop:
 
 ```powershell
 $desktop = [Environment]::GetFolderPath('DesktopDirectory')
 New-Item -ItemType File -Path (Join-Path $desktop 'LaunchpadTestFile.txt') -Force
 New-Item -ItemType Directory -Path (Join-Path $desktop 'LaunchpadTestFolder') -Force
+New-Item -ItemType File -Path (Join-Path $desktop 'LaunchpadTestVeryLongFileNameThatShouldClampToTwoLinesAndNotOverlapNeighboringItems.txt') -Force
 Set-Content -Path (Join-Path $desktop 'LaunchpadTestUrl.url') -Value "[InternetShortcut]`nURL=https://example.com"
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut((Join-Path $desktop 'LaunchpadTestApp.lnk'))
 $shortcut.TargetPath = "$env:WINDIR\System32\notepad.exe"
 $shortcut.Save()
+$brokenShortcut = $shell.CreateShortcut((Join-Path $desktop 'LaunchpadBrokenShortcut.lnk'))
+$brokenShortcut.TargetPath = (Join-Path $desktop 'LaunchpadMissingTarget.exe')
+$brokenShortcut.Save()
 ```
 
-Expected: reopening the launchpad shows `LaunchpadTestFile.txt`, `LaunchpadTestFolder`, `LaunchpadTestUrl`, and `LaunchpadTestApp`.
+Expected: reopening the launchpad shows `LaunchpadTestFile.txt`, `LaunchpadTestFolder`, `LaunchpadTestUrl`, `LaunchpadTestApp`, `LaunchpadBrokenShortcut`, and the long-name file. The long-name label stays within its tile, clamps to two lines, and does not overlap neighboring tiles.
+
+Verify the public Desktop is excluded:
+
+```powershell
+$publicDesktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
+$publicTestPath = Join-Path $publicDesktop 'LaunchpadPublicShouldNotAppear.txt'
+try {
+    New-Item -ItemType File -Path $publicTestPath -Force -ErrorAction Stop
+    "created"
+} catch {
+    "skipped: $($_.Exception.Message)"
+}
+```
+
+Expected: if the public Desktop file was created, reopening the launchpad does not show `LaunchpadPublicShouldNotAppear.txt`. If creation is denied by Windows permissions, inspect the launchpad and confirm existing public Desktop entries are not included.
 
 - [ ] **Step 4: Verify launch and close behavior**
 
 Actions:
 
 - click `LaunchpadTestFolder`;
+- click `LaunchpadBrokenShortcut`;
 - click blank area outside the grid;
+- move the mouse to another monitor, then press `Ctrl + Alt + Space`;
 - press `Ctrl + Alt + Space` while the overlay is open;
 - press `Esc` while the overlay is open.
 
@@ -2554,7 +3077,9 @@ Expected:
 
 - folder opens in File Explorer;
 - overlay closes after clicking a launch item;
+- broken shortcut shows a lightweight error message and remains visible;
 - blank area closes the overlay;
+- overlay opens on the monitor containing the mouse pointer;
 - repeated hotkey closes the overlay;
 - `Esc` closes the overlay.
 
@@ -2580,6 +3105,7 @@ Actions:
 - open the `Desktop Items` tab, select `LaunchpadTestUrl`, and click `Hide Selected Desktop Item`;
 - reopen the launchpad;
 - return to Settings, open `Hidden Desktop Items`, select the hidden ID, and click `Restore Selected`;
+- resize and move the Settings window, close it, then reopen Settings;
 - reopen the launchpad.
 
 Expected:
@@ -2587,9 +3113,14 @@ Expected:
 - manual file and folder entries appear in the `Manual Items` tab after adding;
 - selected manual entry disappears after removal;
 - hidden desktop item disappears from the launchpad after hiding;
-- restored desktop item appears again after restoring.
+- restored desktop item appears again after restoring;
+- Settings reopens at the last saved size and position.
 
-- [ ] **Step 7: Verify autostart toggle**
+- [ ] **Step 7: Verify hotkey editing and autostart toggle**
+
+Run the app, open Settings from the tray menu, replace the hotkey text with `Ctrl + Shift + L`, and click `Apply`.
+
+Expected: `Ctrl + Shift + L` opens and closes the launchpad. Change the hotkey text back to `Ctrl + Alt + Space`, click `Apply`, and confirm the default hotkey works again.
 
 Run the app, open Settings from tray, enable start at login, then check:
 
@@ -2603,7 +3134,24 @@ Disable start at login, then run the same command.
 
 Expected: `LaunchpadWindows` value is absent.
 
-- [ ] **Step 8: Clean temporary Desktop entries**
+- [ ] **Step 8: Verify visual layout and icon fallback**
+
+Actions:
+
+- open the launchpad at the current display scaling;
+- if Windows Settings exposes multiple scaling values for the display, repeat at `100%`, `125%`, and `150%`;
+- resize or move to common desktop resolutions available on the machine, including the smallest attached monitor;
+- inspect `LaunchpadBrokenShortcut` and the long-name file.
+
+Expected:
+
+- frosted/acrylic background is visible on Windows 11;
+- fade-in and fade-out remain smooth;
+- icon tiles stay fixed size during hover and drag;
+- the broken shortcut shows a system or fallback icon instead of an empty tile;
+- long labels stay inside their tiles and do not overlap neighboring entries.
+
+- [ ] **Step 9: Clean temporary Desktop entries**
 
 Run:
 
@@ -2611,13 +3159,20 @@ Run:
 $desktop = [Environment]::GetFolderPath('DesktopDirectory')
 Remove-Item -LiteralPath (Join-Path $desktop 'LaunchpadTestFile.txt') -Force
 Remove-Item -LiteralPath (Join-Path $desktop 'LaunchpadTestFolder') -Recurse -Force
+Remove-Item -LiteralPath (Join-Path $desktop 'LaunchpadTestVeryLongFileNameThatShouldClampToTwoLinesAndNotOverlapNeighboringItems.txt') -Force
 Remove-Item -LiteralPath (Join-Path $desktop 'LaunchpadTestUrl.url') -Force
 Remove-Item -LiteralPath (Join-Path $desktop 'LaunchpadTestApp.lnk') -Force
+Remove-Item -LiteralPath (Join-Path $desktop 'LaunchpadBrokenShortcut.lnk') -Force
+$publicDesktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
+$publicTestPath = Join-Path $publicDesktop 'LaunchpadPublicShouldNotAppear.txt'
+if (Test-Path -LiteralPath $publicTestPath) {
+    Remove-Item -LiteralPath $publicTestPath -Force
+}
 ```
 
 Expected: temporary verification entries are removed from the user Desktop.
 
-- [ ] **Step 9: Publish release build**
+- [ ] **Step 10: Publish release build**
 
 Run:
 
@@ -2627,7 +3182,7 @@ dotnet publish src/LaunchpadWindows/LaunchpadWindows.csproj -c Release -r win-x6
 
 Expected: publish succeeds and creates output under `src/LaunchpadWindows/bin/Release/net10.0-windows/win-x64/publish`.
 
-- [ ] **Step 10: Commit verification notes**
+- [ ] **Step 11: Commit verification notes**
 
 Update this task's checklist in `docs/superpowers/plans/2026-06-22-launchpad-windows.md` as executed, then run:
 
@@ -2644,15 +3199,17 @@ Spec coverage:
 
 - WPF / .NET single-process app: Task 1 and Task 12.
 - Windows 11 target and frosted overlay: Task 11 and Task 13.
-- Current user Desktop scan only: Task 4 and Task 14.
+- Current user Desktop scan only and public Desktop exclusion: Task 4 and Task 14.
 - Manual shortcuts, files, and folders: Task 10, Task 11, and Task 14.
-- `Ctrl + Alt + Space` hotkey: Task 2, Task 8, and Task 12.
+- `Ctrl + Alt + Space` hotkey and settings hotkey editing: Task 2, Task 8, Task 10, Task 11, Task 12, and Task 14.
 - Mouse-monitor full-screen behavior: Task 12 and Task 14.
-- Click item to launch and auto-close: Task 6, Task 9, and Task 14.
+- Click item to launch, broken shortcut handling, and auto-close: Task 6, Task 9, and Task 14.
 - Click blank area and `Esc` close: Task 11 and Task 14.
 - Drag reorder persistence: Task 5, Task 9, Task 11, Task 12, and Task 14.
 - Autostart via `HKCU` Run key: Task 7, Task 10, and Task 14.
-- Error handling for corrupt settings, hotkey conflict, missing paths, and icon failures: Task 3, Task 6, Task 8, Task 12, and Task 13.
+- Error handling for corrupt settings, hotkey conflict, missing paths, desktop scan failures, shortcut failures, and icon failures: Task 3, Task 4, Task 6, Task 8, Task 12, and Task 13.
+- Settings window size and position persistence: Task 2, Task 10, Task 11, and Task 14.
+- Visual checks for long labels, fallback icons, common resolutions, and display scaling: Task 11, Task 13, and Task 14.
 
 Type consistency:
 
@@ -2660,3 +3217,4 @@ Type consistency:
 - `ILauncher` is added before `LaunchpadViewModel` depends on it.
 - `IAutostartService` is added before `SettingsViewModel` depends on it.
 - `HotkeyService.DefaultHotkeyId` and `HotkeyService.WmHotkey` are defined before tests use them.
+- `SettingsViewModel` receives `HotkeyRegistrationResult` from Task 8 and only persists a hotkey after the runtime registration succeeds.
