@@ -18,6 +18,10 @@ Implement the approved design in `docs/superpowers/specs/2026-06-22-launchpad-wi
 
 The spec describes one cohesive desktop application. The work touches several Windows integrations, but they are not independent products. This plan keeps them in one implementation track and splits them by testable module.
 
+## Execution Notes
+
+Each commit step is execution hygiene for agentic workers. Expected for every commit step: the commit succeeds, and `git status --short` shows no unintended tracked changes afterward.
+
 ## File Structure
 
 Create or modify these files:
@@ -25,6 +29,7 @@ Create or modify these files:
 - `global.json`: pin the local SDK.
 - `LaunchpadWindows.sln`: solution file.
 - `src/LaunchpadWindows/LaunchpadWindows.csproj`: WPF app project.
+- `src/LaunchpadWindows/app.manifest`: declares PerMonitorV2 DPI awareness.
 - `src/LaunchpadWindows/App.xaml`: WPF application resource entry.
 - `src/LaunchpadWindows/App.xaml.cs`: composition root, tray lifetime, startup/shutdown.
 - `src/LaunchpadWindows/Models/AppSettings.cs`: persisted settings model and defaults.
@@ -70,13 +75,35 @@ Create or modify these files:
 - Create: `global.json`
 - Create: `LaunchpadWindows.sln`
 - Create: `src/LaunchpadWindows/LaunchpadWindows.csproj`
+- Create: `src/LaunchpadWindows/app.manifest`
 - Create: `tests/LaunchpadWindows.Tests/LaunchpadWindows.Tests.csproj`
 - Modify: `src/LaunchpadWindows/App.xaml`
 - Modify: `src/LaunchpadWindows/App.xaml.cs`
 - Delete: `src/LaunchpadWindows/MainWindow.xaml`
 - Delete: `src/LaunchpadWindows/MainWindow.xaml.cs`
 
-- [ ] **Step 1: Create the solution and projects**
+- [ ] **Step 1: Pin and verify the SDK**
+
+Create `global.json` before any `dotnet new` command:
+
+```json
+{
+  "sdk": {
+    "version": "10.0.102",
+    "rollForward": "latestFeature"
+  }
+}
+```
+
+Run:
+
+```powershell
+dotnet --version
+```
+
+Expected: output is `10.0.102`, or a compatible 10.0 feature-band SDK selected through `rollForward`.
+
+- [ ] **Step 2: Create the solution and projects**
 
 Run:
 
@@ -89,19 +116,6 @@ dotnet sln LaunchpadWindows.sln add tests/LaunchpadWindows.Tests/LaunchpadWindow
 ```
 
 Expected: `LaunchpadWindows.sln` is created, both projects are created, and both projects are added to the solution. The WPF template emits `net10.0-windows`; the xUnit template emits `net10.0` and is replaced in Step 3 before adding the project reference.
-
-- [ ] **Step 2: Pin the SDK**
-
-Create `global.json`:
-
-```json
-{
-  "sdk": {
-    "version": "10.0.102",
-    "rollForward": "latestFeature"
-  }
-}
-```
 
 - [ ] **Step 3: Replace the project files**
 
@@ -118,6 +132,7 @@ Replace `src/LaunchpadWindows/LaunchpadWindows.csproj`:
     <UseWindowsForms>true</UseWindowsForms>
     <AssemblyName>LaunchpadWindows</AssemblyName>
     <RootNamespace>LaunchpadWindows</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
 </Project>
 ```
@@ -190,6 +205,21 @@ public partial class App : System.Windows.Application
 }
 ```
 
+Create `src/LaunchpadWindows/app.manifest`:
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+  <assemblyIdentity version="1.0.0.0" name="LaunchpadWindows.app" />
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2, PerMonitor</dpiAwareness>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+    </windowsSettings>
+  </application>
+</assembly>
+```
+
 Delete generated `src/LaunchpadWindows/MainWindow.xaml` and `src/LaunchpadWindows/MainWindow.xaml.cs`.
 
 - [ ] **Step 5: Verify the blank app builds**
@@ -237,6 +267,7 @@ public sealed class AppSettingsTests
     {
         AppSettings settings = AppSettings.CreateDefault();
 
+        Assert.Equal(1, settings.SchemaVersion);
         Assert.Equal("Ctrl + Alt + Space", settings.Hotkey.ToString());
         Assert.False(settings.AutostartEnabled);
         Assert.Empty(settings.OrderedItemIds);
@@ -418,6 +449,7 @@ namespace LaunchpadWindows.Models;
 
 public sealed class AppSettings
 {
+    public int SchemaVersion { get; set; } = 1;
     public HotkeyGesture Hotkey { get; set; } = HotkeyGesture.Default;
     public bool AutostartEnabled { get; set; }
     public List<string> OrderedItemIds { get; set; } = [];
@@ -675,14 +707,45 @@ public sealed class DesktopScannerTests
         Assert.Equal(["App", "Site"], items.Select(item => item.DisplayName).ToArray());
     }
 
+    [Fact]
+    public void Scan_KeepsShortcutWhenResolverFails()
+    {
+        FakeDesktopReader reader = new([
+            new DesktopEntry(@"C:\Users\hp\Desktop\Broken.lnk", "Broken.lnk", IsDirectory: false)
+        ]);
+        DesktopScanner scanner = new(reader, new FakeShortcutResolver(new InvalidOperationException("bad shortcut")));
+
+        LaunchItem item = scanner.Scan(@"C:\Users\hp\Desktop", DateTimeOffset.UtcNow).Single();
+
+        Assert.Equal(LaunchItemKind.Shortcut, item.Kind);
+        Assert.Null(item.ResolvedTargetPath);
+    }
+
+    [Fact]
+    public void FileSystemReader_ThrowsWhenDesktopDirectoryIsMissing()
+    {
+        string missingPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"), "Desktop");
+        FileSystemDesktopReader reader = new();
+
+        Assert.Throws<DirectoryNotFoundException>(() => reader.ReadTopLevelEntries(missingPath));
+    }
+
     private sealed class FakeDesktopReader(IReadOnlyList<DesktopEntry> entries) : IDesktopReader
     {
         public IReadOnlyList<DesktopEntry> ReadTopLevelEntries(string desktopPath) => entries;
     }
 
-    private sealed class FakeShortcutResolver : IShortcutResolver
+    private sealed class FakeShortcutResolver(Exception? exceptionToThrow = null) : IShortcutResolver
     {
-        public ShortcutResolution Resolve(string shortcutPath) => new(shortcutPath + ".target");
+        public ShortcutResolution Resolve(string shortcutPath)
+        {
+            if (exceptionToThrow is not null)
+            {
+                throw exceptionToThrow;
+            }
+
+            return new ShortcutResolution(shortcutPath + ".target");
+        }
     }
 }
 ```
@@ -752,7 +815,7 @@ public sealed class DesktopScanner
             {
                 resolution = _shortcutResolver.Resolve(entry.FullPath);
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or COMException)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or COMException or InvalidOperationException)
             {
                 resolution = new ShortcutResolution(null);
             }
@@ -762,7 +825,9 @@ public sealed class DesktopScanner
             ? Path.GetFileNameWithoutExtension(entry.Name)
             : entry.Name;
 
-        string normalizedPath = Path.GetFullPath(entry.FullPath).ToUpperInvariant();
+        string normalizedPath = Path.GetFullPath(entry.FullPath)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            .ToUpperInvariant();
         string id = $"desktop:{normalizedPath}";
 
         return new LaunchItem(id, displayName, LaunchItemSource.DesktopScan, kind, entry.FullPath, resolution?.TargetPath, entry.FullPath, scannedAt);
@@ -781,7 +846,7 @@ public sealed class FileSystemDesktopReader : IDesktopReader
     {
         if (!Directory.Exists(desktopPath))
         {
-            return [];
+            throw new DirectoryNotFoundException($"Desktop directory was not found: {desktopPath}");
         }
 
         return Directory.EnumerateFileSystemEntries(desktopPath, "*", SearchOption.TopDirectoryOnly)
@@ -844,14 +909,31 @@ public sealed class ShellShortcutResolver : IShortcutResolver
             string? targetPath = shortcut?.GetType().InvokeMember("TargetPath", System.Reflection.BindingFlags.GetProperty, null, shortcut, null) as string;
             return new ShortcutResolution(string.IsNullOrWhiteSpace(targetPath) ? null : targetPath);
         }
-        catch (COMException)
+        catch (Exception ex) when (IsResolverFailure(ex))
         {
             return new ShortcutResolution(null);
         }
         finally
         {
-            if (shortcut is not null) Marshal.FinalReleaseComObject(shortcut);
-            if (shell is not null) Marshal.FinalReleaseComObject(shell);
+            ReleaseComObject(shortcut);
+            ReleaseComObject(shell);
+        }
+    }
+
+    private static bool IsResolverFailure(Exception ex) =>
+        ex is IOException
+            or UnauthorizedAccessException
+            or COMException
+            or InvalidOperationException
+            or NotSupportedException
+            or System.Reflection.TargetInvocationException
+            or MemberAccessException;
+
+    private static void ReleaseComObject(object? instance)
+    {
+        if (instance is not null && Marshal.IsComObject(instance))
+        {
+            Marshal.FinalReleaseComObject(instance);
         }
     }
 }
@@ -1066,6 +1148,28 @@ public sealed class LauncherServiceTests
     }
 
     [Fact]
+    public void Launch_UsesShortcutFileItselfWhenResolvedTargetExists()
+    {
+        FakeProcessStarter starter = new();
+        LauncherService service = new(starter, path => path.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".exe", StringComparison.OrdinalIgnoreCase), path => false);
+        LaunchItem item = new(
+            "desktop:notepad",
+            "Notepad",
+            LaunchItemSource.DesktopScan,
+            LaunchItemKind.Shortcut,
+            @"C:\Users\hp\Desktop\Notepad.lnk",
+            @"C:\Windows\System32\notepad.exe",
+            "Notepad.lnk",
+            DateTimeOffset.UtcNow);
+
+        LaunchResult result = service.Launch(item);
+
+        Assert.True(result.Success);
+        Assert.Equal(@"C:\Users\hp\Desktop\Notepad.lnk", starter.StartedPaths.Single());
+    }
+
+
+    [Fact]
     public void Launch_UsesResolvedUrlWhenAvailable()
     {
         FakeProcessStarter starter = new();
@@ -1159,6 +1263,11 @@ public interface IProcessStarter
     void Start(string pathOrUrl);
 }
 
+public interface ILauncher
+{
+    LaunchResult Launch(LaunchItem item);
+}
+
 public sealed class ShellProcessStarter : IProcessStarter
 {
     public void Start(string pathOrUrl)
@@ -1167,7 +1276,7 @@ public sealed class ShellProcessStarter : IProcessStarter
     }
 }
 
-public sealed class LauncherService
+public sealed class LauncherService : ILauncher
 {
     private readonly IProcessStarter _processStarter;
     private readonly Func<string, bool> _fileExists;
@@ -1288,7 +1397,21 @@ public sealed class AutostartServiceTests
         Assert.Empty(runKey.Values);
     }
 
-    private sealed class FakeRunKey(bool throwOnSet = false) : IRunKey
+    [Fact]
+    public void SetEnabledFalse_ReturnsFailureWhenRunKeyDeleteFails()
+    {
+        FakeRunKey runKey = new(throwOnDelete: true);
+        runKey.Values["LaunchpadWindows"] = "\"app.exe\"";
+        AutostartService service = new(runKey, () => "app.exe");
+
+        AutostartResult result = service.SetEnabled(false);
+
+        Assert.False(result.Success);
+        Assert.Contains("registry denied", result.Message);
+        Assert.True(runKey.Values.ContainsKey("LaunchpadWindows"));
+    }
+
+    private sealed class FakeRunKey(bool throwOnSet = false, bool throwOnDelete = false) : IRunKey
     {
         public Dictionary<string, string> Values { get; } = [];
         public void SetValue(string name, string value)
@@ -1301,7 +1424,15 @@ public sealed class AutostartServiceTests
             Values[name] = value;
         }
 
-        public void DeleteValue(string name) => Values.Remove(name);
+        public void DeleteValue(string name)
+        {
+            if (throwOnDelete)
+            {
+                throw new UnauthorizedAccessException("registry denied");
+            }
+
+            Values.Remove(name);
+        }
     }
 }
 ```
@@ -1337,6 +1468,11 @@ public interface IRunKey
     void DeleteValue(string name);
 }
 
+public interface IAutostartService
+{
+    AutostartResult SetEnabled(bool enabled);
+}
+
 public sealed class RegistryRunKey : IRunKey
 {
     private const string RunPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -1359,7 +1495,7 @@ public sealed class RegistryRunKey : IRunKey
     }
 }
 
-public sealed class AutostartService
+public sealed class AutostartService : IAutostartService
 {
     private const string RunValueName = "LaunchpadWindows";
     private readonly IRunKey _runKey;
@@ -1734,86 +1870,7 @@ public sealed class LaunchpadViewModelTests
 }
 ```
 
-- [ ] **Step 2: Add launcher interface to existing launcher file**
-
-Modify `src/LaunchpadWindows/Shell/LauncherService.cs` by adding the interface and implementing it:
-
-```csharp
-using System.Diagnostics;
-using LaunchpadWindows.Models;
-
-namespace LaunchpadWindows.Shell;
-
-public sealed record LaunchResult(bool Success, string Message)
-{
-    public static LaunchResult Ok() => new(true, "");
-    public static LaunchResult Fail(string message) => new(false, message);
-}
-
-public interface IProcessStarter
-{
-    void Start(string pathOrUrl);
-}
-
-public interface ILauncher
-{
-    LaunchResult Launch(LaunchItem item);
-}
-
-public sealed class ShellProcessStarter : IProcessStarter
-{
-    public void Start(string pathOrUrl)
-    {
-        Process.Start(new ProcessStartInfo(pathOrUrl) { UseShellExecute = true });
-    }
-}
-
-public sealed class LauncherService : ILauncher
-{
-    private readonly IProcessStarter _processStarter;
-    private readonly Func<string, bool> _fileExists;
-    private readonly Func<string, bool> _directoryExists;
-
-    public LauncherService(IProcessStarter processStarter, Func<string, bool>? fileExists = null, Func<string, bool>? directoryExists = null)
-    {
-        _processStarter = processStarter;
-        _fileExists = fileExists ?? File.Exists;
-        _directoryExists = directoryExists ?? Directory.Exists;
-    }
-
-    public LaunchResult Launch(LaunchItem item)
-    {
-        string launchTarget = item.Kind == LaunchItemKind.Url && !string.IsNullOrWhiteSpace(item.ResolvedTargetPath)
-            ? item.ResolvedTargetPath
-            : item.PathOrUrl;
-
-        if (item.Kind == LaunchItemKind.Shortcut &&
-            !string.IsNullOrWhiteSpace(item.ResolvedTargetPath) &&
-            !_fileExists(item.ResolvedTargetPath) &&
-            !_directoryExists(item.ResolvedTargetPath))
-        {
-            return LaunchResult.Fail($"Shortcut target does not exist: {item.ResolvedTargetPath}");
-        }
-
-        if (item.Kind != LaunchItemKind.Url && !_fileExists(item.PathOrUrl) && !_directoryExists(item.PathOrUrl))
-        {
-            return LaunchResult.Fail($"Path does not exist: {item.PathOrUrl}");
-        }
-
-        try
-        {
-            _processStarter.Start(launchTarget);
-            return LaunchResult.Ok();
-        }
-        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
-        {
-            return LaunchResult.Fail(ex.Message);
-        }
-    }
-}
-```
-
-- [ ] **Step 3: Run tests and verify failure**
+- [ ] **Step 2: Run tests and verify failure**
 
 Run:
 
@@ -1823,7 +1880,7 @@ dotnet test tests/LaunchpadWindows.Tests/LaunchpadWindows.Tests.csproj --filter 
 
 Expected: compile fails because presentation types do not exist.
 
-- [ ] **Step 4: Implement command helper and view model**
+- [ ] **Step 3: Implement command helper and view model**
 
 Create `src/LaunchpadWindows/Presentation/RelayCommand.cs`:
 
@@ -1931,7 +1988,7 @@ public sealed class LaunchpadViewModel : INotifyPropertyChanged
 }
 ```
 
-- [ ] **Step 5: Run tests and verify pass**
+- [ ] **Step 4: Run tests and verify pass**
 
 Run:
 
@@ -1941,12 +1998,12 @@ dotnet test tests/LaunchpadWindows.Tests/LaunchpadWindows.Tests.csproj --filter 
 
 Expected: `Passed!`.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 Run:
 
 ```powershell
-git add src/LaunchpadWindows/Shell/LauncherService.cs src/LaunchpadWindows/Presentation tests/LaunchpadWindows.Tests/Presentation
+git add src/LaunchpadWindows/Presentation tests/LaunchpadWindows.Tests/Presentation
 git commit -m "feat: add launchpad view model"
 ```
 
@@ -2006,6 +2063,24 @@ public sealed class SettingsViewModelTests
     }
 
     [Fact]
+    public void AddManualUrl_StoresResolvedUrl()
+    {
+        AppSettings settings = AppSettings.CreateDefault();
+        SettingsViewModel vm = new(
+            settings,
+            new FakeAutostart(),
+            @"C:\Users\hp\Desktop",
+            [],
+            shortcutResolver: new FakeShortcutResolver("https://example.com"));
+
+        vm.AddManualItem("Site", LaunchItemKind.Url, @"C:\Users\hp\Desktop\Site.url");
+
+        Assert.Single(settings.ManualItems);
+        Assert.Equal("https://example.com", settings.ManualItems[0].ResolvedTargetPath);
+    }
+
+
+    [Fact]
     public void ToggleAutostart_OnlyUpdatesSettingWhenRegistryWriteSucceeds()
     {
         AppSettings settings = AppSettings.CreateDefault();
@@ -2046,6 +2121,19 @@ public sealed class SettingsViewModelTests
         Assert.Equal("Ctrl + Shift + L", settings.Hotkey.ToString());
         Assert.Equal(1, saves);
     }
+
+    [Fact]
+    public void SetHotkeyText_RejectsHotkeyWithoutModifier()
+    {
+        AppSettings settings = AppSettings.CreateDefault();
+        SettingsViewModel vm = new(settings, new FakeAutostart(), @"C:\Users\hp\Desktop", []);
+
+        vm.SetHotkeyText("L");
+
+        Assert.Equal("Ctrl + Alt + Space", settings.Hotkey.ToString());
+        Assert.Equal("Enter a hotkey such as Ctrl + Alt + Space.", vm.ErrorMessage);
+    }
+
 
     [Fact]
     public void SaveWindowBounds_PersistsSettingsGeometry()
@@ -2092,92 +2180,7 @@ public sealed class SettingsViewModelTests
 }
 ```
 
-- [ ] **Step 2: Modify autostart service to expose an interface**
-
-Modify `src/LaunchpadWindows/SystemIntegration/AutostartService.cs`:
-
-```csharp
-using Microsoft.Win32;
-
-namespace LaunchpadWindows.SystemIntegration;
-
-public sealed record AutostartResult(bool Success, string Message)
-{
-    public static AutostartResult Ok() => new(true, "");
-    public static AutostartResult Fail(string message) => new(false, message);
-}
-
-public interface IRunKey
-{
-    void SetValue(string name, string value);
-    void DeleteValue(string name);
-}
-
-public interface IAutostartService
-{
-    AutostartResult SetEnabled(bool enabled);
-}
-
-public sealed class RegistryRunKey : IRunKey
-{
-    private const string RunPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
-
-    public void SetValue(string name, string value)
-    {
-        using RegistryKey? key = Registry.CurrentUser.CreateSubKey(RunPath, writable: true);
-        if (key is null)
-        {
-            throw new InvalidOperationException("Unable to open HKCU Run key.");
-        }
-
-        key.SetValue(name, value);
-    }
-
-    public void DeleteValue(string name)
-    {
-        using RegistryKey? key = Registry.CurrentUser.OpenSubKey(RunPath, writable: true);
-        key?.DeleteValue(name, throwOnMissingValue: false);
-    }
-}
-
-public sealed class AutostartService : IAutostartService
-{
-    private const string RunValueName = "LaunchpadWindows";
-    private readonly IRunKey _runKey;
-    private readonly Func<string> _executablePathProvider;
-
-    public AutostartService(IRunKey runKey, Func<string> executablePathProvider)
-    {
-        _runKey = runKey;
-        _executablePathProvider = executablePathProvider;
-    }
-
-    public AutostartResult SetEnabled(bool enabled)
-    {
-        try
-        {
-            if (enabled)
-            {
-                _runKey.SetValue(RunValueName, Quote(_executablePathProvider()));
-            }
-            else
-            {
-                _runKey.DeleteValue(RunValueName);
-            }
-
-            return AutostartResult.Ok();
-        }
-        catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException or IOException or InvalidOperationException)
-        {
-            return AutostartResult.Fail(ex.Message);
-        }
-    }
-
-    private static string Quote(string path) => $"\"{path}\"";
-}
-```
-
-- [ ] **Step 3: Run tests and verify failure**
+- [ ] **Step 2: Run tests and verify failure**
 
 Run:
 
@@ -2187,7 +2190,7 @@ dotnet test tests/LaunchpadWindows.Tests/LaunchpadWindows.Tests.csproj --filter 
 
 Expected: compile fails because `SettingsViewModel` does not exist.
 
-- [ ] **Step 4: Implement settings view model**
+- [ ] **Step 3: Implement settings view model**
 
 Create `src/LaunchpadWindows/Presentation/SettingsViewModel.cs`:
 
@@ -2316,6 +2319,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     {
         if (!HotkeyGesture.TryParse(text, out HotkeyGesture? gesture) ||
             gesture is null ||
+            !HasModifier(gesture) ||
             !Enum.TryParse<Key>(gesture.Key, ignoreCase: true, out _))
         {
             ErrorMessage = "Enter a hotkey such as Ctrl + Alt + Space.";
@@ -2378,12 +2382,15 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         }
     }
 
+    private static bool HasModifier(HotkeyGesture gesture) =>
+        gesture.Control || gesture.Alt || gesture.Shift || gesture.Windows;
+
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null) =>
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
 }
 ```
 
-- [ ] **Step 5: Run tests and verify pass**
+- [ ] **Step 4: Run tests and verify pass**
 
 Run:
 
@@ -2393,12 +2400,12 @@ dotnet test tests/LaunchpadWindows.Tests/LaunchpadWindows.Tests.csproj --filter 
 
 Expected: `Passed!`.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 Run:
 
 ```powershell
-git add src/LaunchpadWindows/SystemIntegration/AutostartService.cs src/LaunchpadWindows/Presentation/SettingsViewModel.cs tests/LaunchpadWindows.Tests/Presentation/SettingsViewModelTests.cs
+git add src/LaunchpadWindows/Presentation/SettingsViewModel.cs tests/LaunchpadWindows.Tests/Presentation/SettingsViewModelTests.cs
 git commit -m "feat: add settings view model"
 ```
 
@@ -2492,29 +2499,31 @@ Create `src/LaunchpadWindows/Presentation/LaunchpadWindow.xaml`:
         </Style>
     </Window.Resources>
     <Grid x:Name="BackgroundSurface" Background="#66000000" MouseDown="OnWindowMouseDown">
-        <ItemsControl x:Name="ItemsHost" ItemsSource="{Binding Items}" HorizontalAlignment="Center" VerticalAlignment="Center">
-            <ItemsControl.ItemsPanel>
-                <ItemsPanelTemplate>
-                    <WrapPanel MaxWidth="1040" />
-                </ItemsPanelTemplate>
-            </ItemsControl.ItemsPanel>
-            <ItemsControl.ItemTemplate>
-                <DataTemplate DataType="{x:Type models:LaunchItem}">
-                    <Button Style="{StaticResource ItemButtonStyle}"
-                            Command="{Binding DataContext.LaunchCommand, RelativeSource={RelativeSource AncestorType=Window}}"
-                            CommandParameter="{Binding}"
-                            AllowDrop="True"
-                            PreviewMouseMove="OnItemPreviewMouseMove"
-                            Drop="OnItemDrop">
-                        <StackPanel>
-                            <Border Width="72" Height="72" CornerRadius="18" Background="#33FFFFFF" HorizontalAlignment="Center" />
-                            <TextBlock Text="{Binding DisplayName}" Margin="0,10,0,0" TextAlignment="Center" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" LineHeight="18" MaxHeight="36" />
-                        </StackPanel>
-                    </Button>
-                </DataTemplate>
-            </ItemsControl.ItemTemplate>
-        </ItemsControl>
-        <TextBlock Text="{Binding ErrorMessage}" Foreground="White" Background="#CC000000" Padding="12,8" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,48">
+        <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto" Padding="24">
+            <ItemsControl x:Name="ItemsHost" ItemsSource="{Binding Items}" HorizontalAlignment="Center" VerticalAlignment="Center">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <WrapPanel MaxWidth="1040" />
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate DataType="{x:Type models:LaunchItem}">
+                        <Button Style="{StaticResource ItemButtonStyle}"
+                                Command="{Binding DataContext.LaunchCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                CommandParameter="{Binding}"
+                                AllowDrop="True"
+                                PreviewMouseMove="OnItemPreviewMouseMove"
+                                Drop="OnItemDrop">
+                            <StackPanel>
+                                <Border Width="72" Height="72" CornerRadius="18" Background="#33FFFFFF" HorizontalAlignment="Center" />
+                                <TextBlock Text="{Binding DisplayName}" Margin="0,10,0,0" TextAlignment="Center" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" MaxLines="2" LineHeight="18" MaxHeight="36" Width="100" />
+                            </StackPanel>
+                        </Button>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </ScrollViewer>
+        <TextBlock x:Name="ErrorToast" Text="{Binding ErrorMessage}" Foreground="White" Background="#CC000000" Padding="12,8" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,48" MouseDown="OnErrorToastMouseDown">
             <TextBlock.Style>
                 <Style TargetType="TextBlock">
                     <Setter Property="Visibility" Value="Visible" />
@@ -2591,6 +2600,11 @@ public partial class LaunchpadWindow : Window
         {
             FadeOutAndClose();
         }
+    }
+
+    private void OnErrorToastMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        e.Handled = true;
     }
 
     private void OnItemPreviewMouseMove(object sender, MouseEventArgs e)
@@ -2841,6 +2855,8 @@ git commit -m "feat: add launchpad and settings windows"
 
 Create `src/LaunchpadWindows/SystemIntegration/MonitorService.cs`:
 
+The service returns WPF device-independent bounds for the monitor containing the current mouse pointer. It intentionally converts WinForms screen pixels by the target monitor DPI and must be manually verified on negative-coordinate and mixed-DPI monitor layouts in Task 14.
+
 ```csharp
 using System.Runtime.InteropServices;
 using System.Windows;
@@ -2957,6 +2973,9 @@ public partial class App : System.Windows.Application
     private HotkeyService _hotkey = null!;
     private HwndSource _messageSource = null!;
     private LaunchpadWindow? _launchpadWindow;
+    private bool _isOpeningLaunchpad;
+
+    private sealed record DesktopScanResult(bool Success, IReadOnlyList<LaunchItem> Items);
 
     protected override async void OnStartup(StartupEventArgs e)
     {
@@ -2981,6 +3000,7 @@ public partial class App : System.Windows.Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        _launchpadWindow?.Close();
         _hotkey.Unregister();
         _messageSource.Dispose();
         _tray.Dispose();
@@ -3005,61 +3025,99 @@ public partial class App : System.Windows.Application
         }
     }
 
-    private void OpenLaunchpad()
+    private async void OpenLaunchpad()
     {
-        string desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
-        IReadOnlyList<LaunchItem> scanned = ScanDesktopOrReport(desktopPath);
-        IReadOnlyList<LaunchItem> items = ItemMerger.Merge(_settings, scanned);
-        _settingsStore.SaveAsync(_settings).GetAwaiter().GetResult();
-
-        LaunchpadViewModel viewModel = new(new LauncherService(new ShellProcessStarter()));
-        viewModel.SetItems(items);
-        viewModel.CloseRequested += (_, _) => _launchpadWindow?.FadeOutAndClose();
-        viewModel.OrderChanged += (_, ids) =>
+        if (_launchpadWindow?.IsVisible == true)
         {
-            _settings.OrderedItemIds = ids.ToList();
-            _settingsStore.SaveAsync(_settings).GetAwaiter().GetResult();
-        };
+            _launchpadWindow.Activate();
+            return;
+        }
 
-        Rect bounds = new MonitorService().GetMouseMonitorBounds();
-        _launchpadWindow = new LaunchpadWindow(viewModel, _settings.FadeDuration)
+        if (_isOpeningLaunchpad)
         {
-            Left = bounds.Left,
-            Top = bounds.Top,
-            Width = bounds.Width,
-            Height = bounds.Height
-        };
-        _launchpadWindow.Show();
-        _launchpadWindow.Activate();
+            return;
+        }
+
+        _isOpeningLaunchpad = true;
+        try
+        {
+            string desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+            DesktopScanResult scan = ScanDesktopOrReport(desktopPath);
+            IReadOnlyList<LaunchItem> items;
+            if (scan.Success)
+            {
+                items = ItemMerger.Merge(_settings, scan.Items);
+                await _settingsStore.SaveAsync(_settings);
+            }
+            else
+            {
+                items = _settings.ManualItems.ToList();
+            }
+
+            LaunchpadViewModel viewModel = new(new LauncherService(new ShellProcessStarter()));
+            viewModel.SetItems(items);
+            if (scan.Success)
+            {
+                viewModel.OrderChanged += async (_, ids) =>
+                {
+                    _settings.OrderedItemIds = ids.ToList();
+                    await _settingsStore.SaveAsync(_settings);
+                };
+            }
+
+            Rect bounds = new MonitorService().GetMouseMonitorBounds();
+            LaunchpadWindow window = new(viewModel, _settings.FadeDuration)
+            {
+                Left = bounds.Left,
+                Top = bounds.Top,
+                Width = bounds.Width,
+                Height = bounds.Height
+            };
+            viewModel.CloseRequested += (_, _) => window.FadeOutAndClose();
+            window.Closed += (_, _) =>
+            {
+                if (ReferenceEquals(_launchpadWindow, window))
+                {
+                    _launchpadWindow = null;
+                }
+            };
+            _launchpadWindow = window;
+            window.Show();
+            window.Activate();
+        }
+        finally
+        {
+            _isOpeningLaunchpad = false;
+        }
     }
 
     private void OpenSettings()
     {
         string desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
         string executablePath = Environment.ProcessPath ?? Assembly.GetExecutingAssembly().Location;
-        IReadOnlyList<LaunchItem> scanned = ScanDesktopOrReport(desktopPath);
+        DesktopScanResult scan = ScanDesktopOrReport(desktopPath);
         SettingsViewModel viewModel = new(
             _settings,
             new AutostartService(new RegistryRunKey(), () => executablePath),
             desktopPath,
-            scanned,
+            scan.Items,
             RegisterHotkeyFromSettings,
             new ShellShortcutResolver());
-        viewModel.SaveRequested += (_, _) => _settingsStore.SaveAsync(_settings).GetAwaiter().GetResult();
+        viewModel.SaveRequested += async (_, _) => await _settingsStore.SaveAsync(_settings);
         new SettingsWindow(viewModel).Show();
     }
 
-    private IReadOnlyList<LaunchItem> ScanDesktopOrReport(string desktopPath)
+    private DesktopScanResult ScanDesktopOrReport(string desktopPath)
     {
         try
         {
             DesktopScanner scanner = new(new FileSystemDesktopReader(), new ShellShortcutResolver());
-            return scanner.Scan(desktopPath, DateTimeOffset.UtcNow);
+            return new DesktopScanResult(true, scanner.Scan(desktopPath, DateTimeOffset.UtcNow));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or COMException)
         {
             _tray.ShowMessage("Launchpad Windows", $"Desktop scan failed: {ex.Message}");
-            return [];
+            return new DesktopScanResult(false, []);
         }
     }
 
@@ -3210,37 +3268,76 @@ public sealed class LaunchItemIconConverter : IValueConverter
 
 - [ ] **Step 3: Bind launchpad tiles to system icons**
 
-Modify `src/LaunchpadWindows/Presentation/LaunchpadWindow.xaml` resources:
+Replace `src/LaunchpadWindows/Presentation/LaunchpadWindow.xaml` with the final icon-enabled window:
 
 ```xml
-<Window.Resources>
-    <local:LaunchItemIconConverter x:Key="LaunchItemIconConverter" />
-    <Style TargetType="Button" x:Key="ItemButtonStyle">
-        <Setter Property="Width" Value="112" />
-        <Setter Property="Height" Value="132" />
-        <Setter Property="Margin" Value="8" />
-        <Setter Property="Background" Value="Transparent" />
-        <Setter Property="BorderBrush" Value="Transparent" />
-        <Setter Property="Foreground" Value="White" />
-    </Style>
-</Window.Resources>
-```
-
-Add the local namespace to the `Window` element:
-
-```xml
-xmlns:local="clr-namespace:LaunchpadWindows.Presentation"
-```
-
-Replace the tile `StackPanel`:
-
-```xml
-<StackPanel>
-    <Border Width="72" Height="72" CornerRadius="18" Background="#33FFFFFF" HorizontalAlignment="Center">
-        <Image Source="{Binding Converter={StaticResource LaunchItemIconConverter}}" Width="54" Height="54" HorizontalAlignment="Center" VerticalAlignment="Center" />
-    </Border>
-    <TextBlock Text="{Binding DisplayName}" Margin="0,10,0,0" TextAlignment="Center" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" LineHeight="18" MaxHeight="36" />
-</StackPanel>
+<Window x:Class="LaunchpadWindows.Presentation.LaunchpadWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:models="clr-namespace:LaunchpadWindows.Models"
+        xmlns:local="clr-namespace:LaunchpadWindows.Presentation"
+        WindowStyle="None"
+        ResizeMode="NoResize"
+        Topmost="True"
+        ShowInTaskbar="False"
+        Background="Transparent"
+        Opacity="0"
+        KeyDown="OnKeyDown">
+    <Window.Resources>
+        <local:LaunchItemIconConverter x:Key="LaunchItemIconConverter" />
+        <Style TargetType="Button" x:Key="ItemButtonStyle">
+            <Setter Property="Width" Value="112" />
+            <Setter Property="Height" Value="132" />
+            <Setter Property="Margin" Value="8" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="Foreground" Value="White" />
+        </Style>
+    </Window.Resources>
+    <Grid x:Name="BackgroundSurface" Background="#66000000" MouseDown="OnWindowMouseDown">
+        <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto" Padding="24">
+            <ItemsControl x:Name="ItemsHost" ItemsSource="{Binding Items}" HorizontalAlignment="Center" VerticalAlignment="Center">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <WrapPanel MaxWidth="1040" />
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate DataType="{x:Type models:LaunchItem}">
+                        <Button Style="{StaticResource ItemButtonStyle}"
+                                Command="{Binding DataContext.LaunchCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                CommandParameter="{Binding}"
+                                AllowDrop="True"
+                                PreviewMouseMove="OnItemPreviewMouseMove"
+                                Drop="OnItemDrop">
+                            <StackPanel>
+                                <Border Width="72" Height="72" CornerRadius="18" Background="#33FFFFFF" HorizontalAlignment="Center">
+                                    <Image Source="{Binding Converter={StaticResource LaunchItemIconConverter}}" Width="54" Height="54" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                </Border>
+                                <TextBlock Text="{Binding DisplayName}" Margin="0,10,0,0" TextAlignment="Center" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" MaxLines="2" LineHeight="18" MaxHeight="36" Width="100" />
+                            </StackPanel>
+                        </Button>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </ScrollViewer>
+        <TextBlock x:Name="ErrorToast" Text="{Binding ErrorMessage}" Foreground="White" Background="#CC000000" Padding="12,8" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,48" MouseDown="OnErrorToastMouseDown">
+            <TextBlock.Style>
+                <Style TargetType="TextBlock">
+                    <Setter Property="Visibility" Value="Visible" />
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding ErrorMessage}" Value="{x:Null}">
+                            <Setter Property="Visibility" Value="Collapsed" />
+                        </DataTrigger>
+                        <DataTrigger Binding="{Binding ErrorMessage}" Value="">
+                            <Setter Property="Visibility" Value="Collapsed" />
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </TextBlock.Style>
+        </TextBlock>
+    </Grid>
+</Window>
 ```
 
 The fixed `Border` preserves tile layout, and `IconProvider` returns the standard application icon when shell icon extraction fails.
@@ -3251,10 +3348,10 @@ Run:
 
 ```powershell
 dotnet build src/LaunchpadWindows/LaunchpadWindows.csproj
-dotnet run --project src/LaunchpadWindows/LaunchpadWindows.csproj
+$run = Start-Process dotnet -ArgumentList @('run', '--project', 'src/LaunchpadWindows/LaunchpadWindows.csproj') -PassThru -WindowStyle Hidden
 ```
 
-Expected: app starts, tray icon appears, and the tray menu can open a full-screen overlay.
+Expected: app starts, tray icon appears, and the tray menu can open a full-screen overlay. After the smoke test, choose `Exit` from the tray menu and confirm `$run.HasExited` becomes `True` before continuing.
 
 - [ ] **Step 5: Commit**
 
@@ -3287,7 +3384,7 @@ Expected: all tests pass.
 Run:
 
 ```powershell
-dotnet run --project src/LaunchpadWindows/LaunchpadWindows.csproj
+$run = Start-Process dotnet -ArgumentList @('run', '--project', 'src/LaunchpadWindows/LaunchpadWindows.csproj') -PassThru -WindowStyle Hidden
 ```
 
 Expected:
@@ -3295,7 +3392,8 @@ Expected:
 - tray icon appears;
 - tray menu contains `Open Launchpad`, `Settings`, and `Exit`;
 - `Ctrl + Alt + Space` opens the launchpad;
-- pressing `Esc` closes the launchpad with fade-out.
+- pressing `Esc` closes the launchpad with fade-out;
+- after choosing `Exit` from the tray menu, `$run.HasExited` becomes `True`.
 
 - [ ] **Step 3: Verify current-user Desktop scan**
 
@@ -3303,42 +3401,82 @@ Create temporary entries on the current user's Desktop:
 
 ```powershell
 $desktop = [Environment]::GetFolderPath('DesktopDirectory')
-New-Item -ItemType File -Path (Join-Path $desktop 'LaunchpadTestFile.txt') -Force
-New-Item -ItemType Directory -Path (Join-Path $desktop 'LaunchpadTestFolder') -Force
-New-Item -ItemType File -Path (Join-Path $desktop 'LaunchpadTestVeryLongFileNameThatShouldClampToTwoLinesAndNotOverlapNeighboringItems.txt') -Force
-Set-Content -Path (Join-Path $desktop 'LaunchpadTestUrl.url') -Value "[InternetShortcut]`nURL=https://example.com"
+$testPrefix = "LaunchpadTest-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+$manifestPath = Join-Path $env:TEMP "$testPrefix-created-paths.txt"
+New-Item -ItemType File -Path $manifestPath -Force | Out-Null
+function Add-CreatedPath([string]$path) {
+    Add-Content -LiteralPath $manifestPath -Value $path
+}
+
+$testFile = Join-Path $desktop "$testPrefix-File.txt"
+$testFolder = Join-Path $desktop "$testPrefix-Folder"
+$longFile = Join-Path $desktop "$testPrefix-VeryLongFileNameThatShouldClampToTwoLinesAndNotOverlapNeighboringItems.txt"
+$testUrl = Join-Path $desktop "$testPrefix-Url.url"
+$testShortcut = Join-Path $desktop "$testPrefix-App.lnk"
+$brokenShortcutPath = Join-Path $desktop "$testPrefix-BrokenShortcut.lnk"
+
+foreach ($path in @($testFile, $testFolder, $longFile, $testUrl, $testShortcut, $brokenShortcutPath)) {
+    if (Test-Path -LiteralPath $path) {
+        throw "Unexpected existing test path: $path"
+    }
+}
+
+New-Item -ItemType File -Path $testFile -ErrorAction Stop | Out-Null
+Add-CreatedPath $testFile
+New-Item -ItemType Directory -Path $testFolder -ErrorAction Stop | Out-Null
+New-Item -ItemType File -Path (Join-Path $testFolder '.launchpad-test-marker') -ErrorAction Stop | Out-Null
+Add-CreatedPath $testFolder
+New-Item -ItemType File -Path $longFile -ErrorAction Stop | Out-Null
+Add-CreatedPath $longFile
+Set-Content -LiteralPath $testUrl -Value "[InternetShortcut]`nURL=https://example.com"
+Add-CreatedPath $testUrl
 $shell = New-Object -ComObject WScript.Shell
-$shortcut = $shell.CreateShortcut((Join-Path $desktop 'LaunchpadTestApp.lnk'))
-$shortcut.TargetPath = "$env:WINDIR\System32\notepad.exe"
-$shortcut.Save()
-$brokenShortcut = $shell.CreateShortcut((Join-Path $desktop 'LaunchpadBrokenShortcut.lnk'))
-$brokenShortcut.TargetPath = (Join-Path $desktop 'LaunchpadMissingTarget.exe')
-$brokenShortcut.Save()
+try {
+    $shortcut = $shell.CreateShortcut($testShortcut)
+    $shortcut.TargetPath = "$env:WINDIR\System32\notepad.exe"
+    $shortcut.Save()
+    Add-CreatedPath $testShortcut
+
+    $brokenShortcut = $shell.CreateShortcut($brokenShortcutPath)
+    $brokenShortcut.TargetPath = (Join-Path $desktop "$testPrefix-MissingTarget.exe")
+    $brokenShortcut.Save()
+    Add-CreatedPath $brokenShortcutPath
+} finally {
+    if ($shortcut) { [Runtime.InteropServices.Marshal]::FinalReleaseComObject($shortcut) | Out-Null }
+    if ($brokenShortcut) { [Runtime.InteropServices.Marshal]::FinalReleaseComObject($brokenShortcut) | Out-Null }
+    [Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) | Out-Null
+}
+
+"Test prefix: $testPrefix"
+"Manifest: $manifestPath"
 ```
 
-Expected: reopening the launchpad shows `LaunchpadTestFile.txt`, `LaunchpadTestFolder`, `LaunchpadTestUrl`, `LaunchpadTestApp`, `LaunchpadBrokenShortcut`, and the long-name file. The long-name label stays within its tile, clamps to two lines, and does not overlap neighboring tiles.
+Expected: reopening the launchpad shows the generated items named `$testPrefix-File.txt`, `$testPrefix-Folder`, `$testPrefix-Url`, `$testPrefix-App`, `$testPrefix-BrokenShortcut`, and the long-name file. It does not show the nested `.launchpad-test-marker` file inside `$testPrefix-Folder`, confirming the Desktop scan is non-recursive. The long-name label stays within its tile, clamps to two lines, and does not overlap neighboring tiles. Keep the printed `$testPrefix` and `$manifestPath` for the cleanup step.
 
-Verify the public Desktop is excluded:
+In the same PowerShell session, verify the public Desktop is excluded:
 
 ```powershell
 $publicDesktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
-$publicTestPath = Join-Path $publicDesktop 'LaunchpadPublicShouldNotAppear.txt'
+$publicTestPath = Join-Path $publicDesktop "$testPrefix-PublicShouldNotAppear.txt"
 try {
-    New-Item -ItemType File -Path $publicTestPath -Force -ErrorAction Stop
+    New-Item -ItemType File -Path $publicTestPath -ErrorAction Stop | Out-Null
+    Add-CreatedPath $publicTestPath
     "created"
 } catch {
     "skipped: $($_.Exception.Message)"
 }
 ```
 
-Expected: if the public Desktop file was created, reopening the launchpad does not show `LaunchpadPublicShouldNotAppear.txt`. If creation is denied by Windows permissions, inspect the launchpad and confirm existing public Desktop entries are not included.
+Expected: if the public Desktop file was created, reopening the launchpad does not show the generated `$testPrefix-PublicShouldNotAppear.txt`. If creation is denied by Windows permissions, inspect the launchpad and confirm existing public Desktop entries are not included.
 
 - [ ] **Step 4: Verify launch and close behavior**
 
 Actions:
 
-- click `LaunchpadTestFolder`;
-- click `LaunchpadBrokenShortcut`;
+- reopen the launchpad between launch-item checks when a successful launch closes it;
+- click the folder item named `$testPrefix-Folder`;
+- click the URL item named `$testPrefix-Url`;
+- click the broken shortcut item named `$testPrefix-BrokenShortcut`;
 - click blank area outside the grid;
 - move the mouse to another monitor, then press `Ctrl + Alt + Space`;
 - press `Ctrl + Alt + Space` while the overlay is open;
@@ -3347,6 +3485,7 @@ Actions:
 Expected:
 
 - folder opens in File Explorer;
+- URL opens with the default browser;
 - overlay closes after clicking a launch item;
 - broken shortcut shows a lightweight error message and remains visible;
 - blank area closes the overlay;
@@ -3359,22 +3498,23 @@ Expected:
 Actions:
 
 - open the launchpad;
-- drag `LaunchpadTestApp` before `LaunchpadTestFile.txt`;
+- drag `$testPrefix-File.txt` before `$testPrefix-App`;
 - close the launchpad;
 - reopen the launchpad.
 
-Expected: `LaunchpadTestApp` remains before `LaunchpadTestFile.txt` after reopening.
+Expected: `$testPrefix-File.txt` remains before `$testPrefix-App` after reopening.
 
 - [ ] **Step 6: Verify settings item management**
 
 Actions:
 
 - open Settings from the tray menu;
-- click `Add File Or Shortcut` and select `LaunchpadTestApp.lnk`;
-- click `Add File Or Shortcut` and select `LaunchpadTestFile.txt`;
-- click `Add Folder` and select `LaunchpadTestFolder`;
+- click `Add File Or Shortcut` and select `$testPrefix-App.lnk`;
+- click `Add File Or Shortcut` and select `$testPrefix-Url.url`;
+- click `Add File Or Shortcut` and select `$testPrefix-File.txt`;
+- click `Add Folder` and select `$testPrefix-Folder`;
 - select one manual item and click `Remove Manual`;
-- open the `Desktop Items` tab, select `LaunchpadTestUrl`, and click `Hide Selected Desktop Item`;
+- open the `Desktop Items` tab, select `$testPrefix-Url`, and click `Hide Selected Desktop Item`;
 - reopen the launchpad;
 - return to Settings, open `Hidden Desktop Items`, select the hidden ID, and click `Restore Selected`;
 - resize and move the Settings window, close it, then reopen Settings;
@@ -3382,8 +3522,8 @@ Actions:
 
 Expected:
 
-- manual shortcut, file, and folder entries appear in the `Manual Items` tab after adding;
-- clicking the manual `LaunchpadTestApp` entry launches the shortcut target through shell behavior and closes the overlay;
+- manual shortcut, URL, file, and folder entries appear in the `Manual Items` tab after adding;
+- clicking the manual `$testPrefix-App` entry launches the shortcut target through shell behavior and closes the overlay;
 - selected manual entry disappears after removal;
 - hidden desktop item disappears from the launchpad after hiding;
 - restored desktop item appears again after restoring;
@@ -3403,9 +3543,13 @@ Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' | Select-
 
 Expected: output includes a quoted path to `LaunchpadWindows.exe`.
 
-Disable start at login, then run the same command.
+Disable start at login, then run:
 
-Expected: `LaunchpadWindows` value is absent.
+```powershell
+(Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run').PSObject.Properties.Name -contains 'LaunchpadWindows'
+```
+
+Expected: output is `False`.
 
 - [ ] **Step 8: Verify visual layout and icon fallback**
 
@@ -3413,13 +3557,15 @@ Actions:
 
 - open the launchpad at the current display scaling;
 - if Windows Settings exposes multiple scaling values for the display, repeat at `100%`, `125%`, and `150%`;
+- if two or more monitors are available, place one monitor to the left or above the primary display so it has negative virtual-screen coordinates, use different scaling values across the monitors when Windows allows it, move the mouse to each monitor, and open the launchpad from the hotkey;
 - resize or move to common desktop resolutions available on the machine, including the smallest attached monitor;
-- inspect `LaunchpadBrokenShortcut` and the long-name file.
+- inspect `$testPrefix-BrokenShortcut` and the long-name file.
 
 Expected:
 
 - frosted/acrylic background is visible on Windows 11;
 - fade-in and fade-out remain smooth;
+- on mixed-DPI or negative-coordinate displays, the overlay covers the monitor containing the mouse pointer and does not appear offset, undersized, or on the wrong monitor;
 - icon tiles stay fixed size during hover and drag;
 - the broken shortcut shows a system or fallback icon instead of an empty tile;
 - long labels stay inside their tiles and do not overlap neighboring entries.
@@ -3429,18 +3575,55 @@ Expected:
 Run:
 
 ```powershell
-$desktop = [Environment]::GetFolderPath('DesktopDirectory')
-Remove-Item -LiteralPath (Join-Path $desktop 'LaunchpadTestFile.txt') -Force
-Remove-Item -LiteralPath (Join-Path $desktop 'LaunchpadTestFolder') -Recurse -Force
-Remove-Item -LiteralPath (Join-Path $desktop 'LaunchpadTestVeryLongFileNameThatShouldClampToTwoLinesAndNotOverlapNeighboringItems.txt') -Force
-Remove-Item -LiteralPath (Join-Path $desktop 'LaunchpadTestUrl.url') -Force
-Remove-Item -LiteralPath (Join-Path $desktop 'LaunchpadTestApp.lnk') -Force
-Remove-Item -LiteralPath (Join-Path $desktop 'LaunchpadBrokenShortcut.lnk') -Force
-$publicDesktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
-$publicTestPath = Join-Path $publicDesktop 'LaunchpadPublicShouldNotAppear.txt'
-if (Test-Path -LiteralPath $publicTestPath) {
-    Remove-Item -LiteralPath $publicTestPath -Force
+if ([string]::IsNullOrWhiteSpace($testPrefix) -or [string]::IsNullOrWhiteSpace($manifestPath)) {
+    throw 'Run Step 3 first and keep $testPrefix and $manifestPath from that session.'
 }
+
+if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+    throw "Manifest not found: $manifestPath"
+}
+
+$desktopRoot = [System.IO.Path]::GetFullPath([Environment]::GetFolderPath('DesktopDirectory')).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+$publicDesktopRoot = [System.IO.Path]::GetFullPath([Environment]::GetFolderPath('CommonDesktopDirectory')).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+function Test-IsWithinRoot([string]$candidatePath, [string]$rootPath) {
+    $candidateFull = [System.IO.Path]::GetFullPath($candidatePath)
+    $rootFull = [System.IO.Path]::GetFullPath($rootPath).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    $rootPrefix = $rootFull + [System.IO.Path]::DirectorySeparatorChar
+    return $candidateFull.Equals($rootFull, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $candidateFull.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+$createdPaths = Get-Content -LiteralPath $manifestPath | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+foreach ($path in $createdPaths) {
+    $fullPath = [System.IO.Path]::GetFullPath($path)
+    if (-not (Test-IsWithinRoot $fullPath $desktopRoot) -and -not (Test-IsWithinRoot $fullPath $publicDesktopRoot)) {
+        Write-Warning "Skipping path outside Desktop roots: $fullPath"
+        continue
+    }
+
+    if (-not (Test-Path -LiteralPath $fullPath)) {
+        continue
+    }
+
+    $leaf = Split-Path -Leaf $fullPath
+    if (-not $leaf.StartsWith($testPrefix, [System.StringComparison]::Ordinal)) {
+        Write-Warning "Skipping path because it does not match the test prefix: $fullPath"
+        continue
+    }
+
+    if (Test-Path -LiteralPath $fullPath -PathType Container) {
+        $marker = Join-Path $fullPath '.launchpad-test-marker'
+        if (Test-Path -LiteralPath $marker -PathType Leaf) {
+            Remove-Item -LiteralPath $fullPath -Recurse -Force
+        } else {
+            Write-Warning "Skipping directory without marker: $fullPath"
+        }
+    } else {
+        Remove-Item -LiteralPath $fullPath -Force
+    }
+}
+
+Remove-Item -LiteralPath $manifestPath -Force
 ```
 
 Expected: temporary verification entries are removed from the user Desktop.
