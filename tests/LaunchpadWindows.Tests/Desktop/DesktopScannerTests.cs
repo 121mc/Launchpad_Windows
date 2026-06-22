@@ -65,6 +65,35 @@ public sealed class DesktopScannerTests
         Assert.Throws<DirectoryNotFoundException>(() => reader.ReadTopLevelEntries(missingPath));
     }
 
+    [Fact]
+    public void FileSystemReader_ReadTopLevelEntries_DoesNotRecurse()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        string tempDesktop = Path.Combine(tempRoot, "Desktop");
+        string nestedDirectory = Path.Combine(tempDesktop, "Nested");
+        Directory.CreateDirectory(nestedDirectory);
+        File.WriteAllText(Path.Combine(tempDesktop, "top.txt"), "top");
+        File.WriteAllText(Path.Combine(nestedDirectory, "nested.txt"), "nested");
+        FileSystemDesktopReader reader = new();
+
+        try
+        {
+            IReadOnlyList<DesktopEntry> entries = reader.ReadTopLevelEntries(tempDesktop);
+
+            string[] names = entries.Select(entry => entry.Name).ToArray();
+            Assert.Contains("top.txt", names);
+            Assert.Contains("Nested", names);
+            Assert.DoesNotContain("nested.txt", names);
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot))
+            {
+                Directory.Delete(tempRoot, recursive: true);
+            }
+        }
+    }
+
     private sealed class FakeDesktopReader(IReadOnlyList<DesktopEntry> entries) : IDesktopReader
     {
         public IReadOnlyList<DesktopEntry> ReadTopLevelEntries(string desktopPath) => entries;
