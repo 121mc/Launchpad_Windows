@@ -258,6 +258,18 @@ public sealed class AppSettingsTests
     }
 
     [Fact]
+    public void ManualShortcut_CanCarryResolvedTarget()
+    {
+        LaunchItem item = LaunchItem.CreateManual(
+            displayName: "Notepad",
+            kind: LaunchItemKind.Shortcut,
+            pathOrUrl: @"C:\Users\hp\Desktop\Notepad.lnk",
+            resolvedTargetPath: @"C:\Windows\System32\notepad.exe");
+
+        Assert.Equal(@"C:\Windows\System32\notepad.exe", item.ResolvedTargetPath);
+    }
+
+    [Fact]
     public void TryParse_AcceptsEditableHotkeyText()
     {
         bool parsed = HotkeyGesture.TryParse("Ctrl + Shift + L", out HotkeyGesture? gesture);
@@ -391,10 +403,10 @@ public sealed record LaunchItem(
     string IconCacheKey,
     DateTimeOffset? LastSeenAt)
 {
-    public static LaunchItem CreateManual(string displayName, LaunchItemKind kind, string pathOrUrl)
+    public static LaunchItem CreateManual(string displayName, LaunchItemKind kind, string pathOrUrl, string? resolvedTargetPath = null)
     {
         string id = $"manual:{Guid.NewGuid():N}";
-        return new LaunchItem(id, displayName, LaunchItemSource.Manual, kind, pathOrUrl, null, pathOrUrl, null);
+        return new LaunchItem(id, displayName, LaunchItemSource.Manual, kind, pathOrUrl, resolvedTargetPath, pathOrUrl, null);
     }
 }
 ```
@@ -996,6 +1008,7 @@ git commit -m "feat: merge scanned and manual launch items"
 Create `tests/LaunchpadWindows.Tests/Shell/LauncherServiceTests.cs`:
 
 ```csharp
+using System.ComponentModel;
 using LaunchpadWindows.Models;
 using LaunchpadWindows.Shell;
 
@@ -1052,10 +1065,65 @@ public sealed class LauncherServiceTests
         Assert.Empty(starter.StartedPaths);
     }
 
-    private sealed class FakeProcessStarter : IProcessStarter
+    [Fact]
+    public void Launch_UsesResolvedUrlWhenAvailable()
+    {
+        FakeProcessStarter starter = new();
+        LauncherService service = new(starter, path => false, path => false);
+        LaunchItem item = new(
+            "desktop:site",
+            "Site",
+            LaunchItemSource.DesktopScan,
+            LaunchItemKind.Url,
+            @"C:\Users\hp\Desktop\Site.url",
+            "https://example.com",
+            "Site.url",
+            DateTimeOffset.UtcNow);
+
+        LaunchResult result = service.Launch(item);
+
+        Assert.True(result.Success);
+        Assert.Equal("https://example.com", starter.StartedPaths.Single());
+    }
+
+    [Fact]
+    public void Launch_ReturnsFailureWhenShellReportsNoAssociatedApp()
+    {
+        FakeProcessStarter starter = new(new Win32Exception("no associated app"));
+        LauncherService service = new(starter, path => true, path => false);
+        LaunchItem item = LaunchItem.CreateManual("Unknown", LaunchItemKind.File, @"C:\file.unknown");
+
+        LaunchResult result = service.Launch(item);
+
+        Assert.False(result.Success);
+        Assert.Contains("no associated app", result.Message);
+    }
+
+    [Fact]
+    public void Launch_ReturnsFailureWhenPermissionDenied()
+    {
+        FakeProcessStarter starter = new(new UnauthorizedAccessException("permission denied"));
+        LauncherService service = new(starter, path => true, path => false);
+        LaunchItem item = LaunchItem.CreateManual("Secret", LaunchItemKind.File, @"C:\secret.txt");
+
+        LaunchResult result = service.Launch(item);
+
+        Assert.False(result.Success);
+        Assert.Contains("permission denied", result.Message);
+    }
+
+    private sealed class FakeProcessStarter(Exception? exceptionToThrow = null) : IProcessStarter
     {
         public List<string> StartedPaths { get; } = [];
-        public void Start(string pathOrUrl) => StartedPaths.Add(pathOrUrl);
+        public void Start(string pathOrUrl)
+        {
+            if (exceptionToThrow is not null)
+            {
+                throw exceptionToThrow;
+            }
+
+            StartedPaths.Add(pathOrUrl);
+        }
     }
 }
 ```
@@ -1114,6 +1182,10 @@ public sealed class LauncherService
 
     public LaunchResult Launch(LaunchItem item)
     {
+        string launchTarget = item.Kind == LaunchItemKind.Url && !string.IsNullOrWhiteSpace(item.ResolvedTargetPath)
+            ? item.ResolvedTargetPath
+            : item.PathOrUrl;
+
         if (item.Kind == LaunchItemKind.Shortcut &&
             !string.IsNullOrWhiteSpace(item.ResolvedTargetPath) &&
             !_fileExists(item.ResolvedTargetPath) &&
@@ -1129,10 +1201,10 @@ public sealed class LauncherService
 
         try
         {
-            _processStarter.Start(item.PathOrUrl);
+            _processStarter.Start(launchTarget);
             return LaunchResult.Ok();
         }
-        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
         {
             return LaunchResult.Fail(ex.Message);
         }
@@ -1711,6 +1783,10 @@ public sealed class LauncherService : ILauncher
 
     public LaunchResult Launch(LaunchItem item)
     {
+        string launchTarget = item.Kind == LaunchItemKind.Url && !string.IsNullOrWhiteSpace(item.ResolvedTargetPath)
+            ? item.ResolvedTargetPath
+            : item.PathOrUrl;
+
         if (item.Kind == LaunchItemKind.Shortcut &&
             !string.IsNullOrWhiteSpace(item.ResolvedTargetPath) &&
             !_fileExists(item.ResolvedTargetPath) &&
@@ -1726,10 +1802,10 @@ public sealed class LauncherService : ILauncher
 
         try
         {
-            _processStarter.Start(item.PathOrUrl);
+            _processStarter.Start(launchTarget);
             return LaunchResult.Ok();
         }
-        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
         {
             return LaunchResult.Fail(ex.Message);
         }
@@ -1889,6 +1965,7 @@ Create `tests/LaunchpadWindows.Tests/Presentation/SettingsViewModelTests.cs`:
 ```csharp
 using LaunchpadWindows.Models;
 using LaunchpadWindows.Presentation;
+using LaunchpadWindows.Shortcuts;
 using LaunchpadWindows.SystemIntegration;
 
 namespace LaunchpadWindows.Tests.Presentation;
@@ -1909,6 +1986,23 @@ public sealed class SettingsViewModelTests
         Assert.Single(vm.ManualItems);
         Assert.Equal("Readme", settings.ManualItems[0].DisplayName);
         Assert.Equal(1, saves);
+    }
+
+    [Fact]
+    public void AddManualShortcut_StoresResolvedTarget()
+    {
+        AppSettings settings = AppSettings.CreateDefault();
+        SettingsViewModel vm = new(
+            settings,
+            new FakeAutostart(),
+            @"C:\Users\hp\Desktop",
+            [],
+            shortcutResolver: new FakeShortcutResolver(@"C:\Windows\System32\notepad.exe"));
+
+        vm.AddManualItem("Notepad", LaunchItemKind.Shortcut, @"C:\Users\hp\Desktop\Notepad.lnk");
+
+        Assert.Single(settings.ManualItems);
+        Assert.Equal(@"C:\Windows\System32\notepad.exe", settings.ManualItems[0].ResolvedTargetPath);
     }
 
     [Fact]
@@ -1989,6 +2083,11 @@ public sealed class SettingsViewModelTests
     {
         public AutostartResult SetEnabled(bool enabled) =>
             success ? AutostartResult.Ok() : AutostartResult.Fail("registry denied");
+    }
+
+    private sealed class FakeShortcutResolver(string? targetPath) : IShortcutResolver
+    {
+        public ShortcutResolution Resolve(string shortcutPath) => new(targetPath);
     }
 }
 ```
@@ -2095,9 +2194,11 @@ Create `src/LaunchpadWindows/Presentation/SettingsViewModel.cs`:
 ```csharp
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Runtime.CompilerServices;
 using System.Windows.Input;
 using LaunchpadWindows.Models;
+using LaunchpadWindows.Shortcuts;
 using LaunchpadWindows.SystemIntegration;
 
 namespace LaunchpadWindows.Presentation;
@@ -2107,6 +2208,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private readonly AppSettings _settings;
     private readonly IAutostartService _autostartService;
     private readonly Func<HotkeyGesture, HotkeyRegistrationResult> _hotkeyUpdater;
+    private readonly IShortcutResolver? _shortcutResolver;
     private readonly List<LaunchItem> _allDesktopItems;
     private string? _errorMessage;
 
@@ -2115,11 +2217,13 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         IAutostartService autostartService,
         string desktopPath,
         IReadOnlyList<LaunchItem> desktopItems,
-        Func<HotkeyGesture, HotkeyRegistrationResult>? hotkeyUpdater = null)
+        Func<HotkeyGesture, HotkeyRegistrationResult>? hotkeyUpdater = null,
+        IShortcutResolver? shortcutResolver = null)
     {
         _settings = settings;
         _autostartService = autostartService;
         _hotkeyUpdater = hotkeyUpdater ?? (_ => HotkeyRegistrationResult.Ok());
+        _shortcutResolver = shortcutResolver;
         _allDesktopItems = desktopItems.ToList();
         DesktopPath = desktopPath;
         foreach (LaunchItem item in settings.ManualItems)
@@ -2163,7 +2267,8 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
     public void AddManualItem(string displayName, LaunchItemKind kind, string pathOrUrl)
     {
-        LaunchItem item = LaunchItem.CreateManual(displayName, kind, pathOrUrl);
+        string? resolvedTargetPath = ResolveManualTarget(kind, pathOrUrl);
+        LaunchItem item = LaunchItem.CreateManual(displayName, kind, pathOrUrl, resolvedTargetPath);
         _settings.ManualItems.Add(item);
         ManualItems.Add(item);
         SaveRequested?.Invoke(this, EventArgs.Empty);
@@ -2253,6 +2358,24 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         _settings.SettingsWindowWidth = width;
         _settings.SettingsWindowHeight = height;
         SaveRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    private string? ResolveManualTarget(LaunchItemKind kind, string pathOrUrl)
+    {
+        if (kind is not (LaunchItemKind.Shortcut or LaunchItemKind.Url) || _shortcutResolver is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return _shortcutResolver.Resolve(pathOrUrl).TargetPath;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or COMException)
+        {
+            ErrorMessage = $"Unable to resolve shortcut target: {ex.Message}";
+            return null;
+        }
     }
 
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null) =>
@@ -2416,7 +2539,9 @@ Create `src/LaunchpadWindows/Presentation/LaunchpadWindow.xaml.cs`:
 
 ```csharp
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Media.Animation;
 using LaunchpadWindows.Models;
 
@@ -2461,7 +2586,8 @@ public partial class LaunchpadWindow : Window
 
     private void OnWindowMouseDown(object sender, MouseButtonEventArgs e)
     {
-        if (ReferenceEquals(e.OriginalSource, BackgroundSurface))
+        if (e.ChangedButton == MouseButton.Left &&
+            FindAncestor<Button>(e.OriginalSource as DependencyObject) is null)
         {
             FadeOutAndClose();
         }
@@ -2490,6 +2616,21 @@ public partial class LaunchpadWindow : Window
         int fromIndex = ViewModel.Items.IndexOf(source);
         int toIndex = ViewModel.Items.IndexOf(target);
         ViewModel.MoveItem(fromIndex, toIndex);
+    }
+
+    private static T? FindAncestor<T>(DependencyObject? current) where T : DependencyObject
+    {
+        while (current is not null)
+        {
+            if (current is T match)
+            {
+                return match;
+            }
+
+            current = VisualTreeHelper.GetParent(current);
+        }
+
+        return null;
     }
 }
 ```
@@ -2902,7 +3043,8 @@ public partial class App : System.Windows.Application
             new AutostartService(new RegistryRunKey(), () => executablePath),
             desktopPath,
             scanned,
-            RegisterHotkeyFromSettings);
+            RegisterHotkeyFromSettings,
+            new ShellShortcutResolver());
         viewModel.SaveRequested += (_, _) => _settingsStore.SaveAsync(_settings).GetAwaiter().GetResult();
         new SettingsWindow(viewModel).Show();
     }
@@ -3228,6 +3370,7 @@ Expected: `LaunchpadTestApp` remains before `LaunchpadTestFile.txt` after reopen
 Actions:
 
 - open Settings from the tray menu;
+- click `Add File Or Shortcut` and select `LaunchpadTestApp.lnk`;
 - click `Add File Or Shortcut` and select `LaunchpadTestFile.txt`;
 - click `Add Folder` and select `LaunchpadTestFolder`;
 - select one manual item and click `Remove Manual`;
@@ -3239,7 +3382,8 @@ Actions:
 
 Expected:
 
-- manual file and folder entries appear in the `Manual Items` tab after adding;
+- manual shortcut, file, and folder entries appear in the `Manual Items` tab after adding;
+- clicking the manual `LaunchpadTestApp` entry launches the shortcut target through shell behavior and closes the overlay;
 - selected manual entry disappears after removal;
 - hidden desktop item disappears from the launchpad after hiding;
 - restored desktop item appears again after restoring;
@@ -3329,11 +3473,11 @@ Spec coverage:
 - WPF / .NET single-process app: Task 1 and Task 12.
 - Windows 11 target and frosted overlay: Task 11 and Task 13.
 - Current user Desktop scan only and public Desktop exclusion: Task 4 and Task 14.
-- Manual shortcuts, files, and folders: Task 10, Task 11, and Task 14.
+- Manual shortcuts, files, and folders, including manual shortcut target resolution: Task 2, Task 10, Task 11, and Task 14.
 - `Ctrl + Alt + Space` hotkey and settings hotkey editing: Task 2, Task 8, Task 10, Task 11, Task 12, and Task 14.
 - Mouse-monitor full-screen behavior: Task 12 and Task 14.
-- Click item to launch, broken shortcut handling, and auto-close: Task 6, Task 9, and Task 14.
-- Click blank area and `Esc` close: Task 11 and Task 14.
+- Click item to launch, broken shortcut handling, URL launch target selection, launch failure reporting, and auto-close: Task 6, Task 9, and Task 14.
+- Click blank area, item-grid whitespace, and `Esc` close: Task 11 and Task 14.
 - Drag reorder persistence: Task 5, Task 9, Task 11, Task 12, and Task 14.
 - Autostart via `HKCU` Run key: Task 7, Task 10, and Task 14.
 - Error handling for corrupt settings, hotkey conflict, missing paths, desktop scan failures, shortcut failures, and icon failures: Task 3, Task 4, Task 6, Task 8, Task 12, and Task 13.
