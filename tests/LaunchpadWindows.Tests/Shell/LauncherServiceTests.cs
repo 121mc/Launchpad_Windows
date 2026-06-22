@@ -77,6 +77,51 @@ public sealed class LauncherServiceTests
     }
 
     [Fact]
+    public void Launch_UsesShortcutFileItselfWhenResolvedTargetIsProtocolBased()
+    {
+        FakeProcessStarter starter = new();
+        LauncherService service = new(starter, path => path.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase), path => false);
+        LaunchItem item = new(
+            "desktop:settings",
+            "Settings",
+            LaunchItemSource.DesktopScan,
+            LaunchItemKind.Shortcut,
+            @"C:\Users\hp\Desktop\Settings.lnk",
+            "ms-settings:",
+            "Settings.lnk",
+            DateTimeOffset.UtcNow);
+
+        LaunchResult result = service.Launch(item);
+
+        Assert.True(result.Success);
+        Assert.Equal(@"C:\Users\hp\Desktop\Settings.lnk", starter.StartedPaths.Single());
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void Launch_UsesShortcutFileItselfWhenResolvedTargetIsMissing(string? resolvedTargetPath)
+    {
+        FakeProcessStarter starter = new();
+        LauncherService service = new(starter, path => path.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase), path => false);
+        LaunchItem item = new(
+            "desktop:shortcut",
+            "Shortcut",
+            LaunchItemSource.DesktopScan,
+            LaunchItemKind.Shortcut,
+            @"C:\Users\hp\Desktop\Shortcut.lnk",
+            resolvedTargetPath,
+            "Shortcut.lnk",
+            DateTimeOffset.UtcNow);
+
+        LaunchResult result = service.Launch(item);
+
+        Assert.True(result.Success);
+        Assert.Equal(@"C:\Users\hp\Desktop\Shortcut.lnk", starter.StartedPaths.Single());
+    }
+
+    [Fact]
     public void Launch_UsesResolvedUrlWhenAvailable()
     {
         FakeProcessStarter starter = new();
@@ -95,6 +140,43 @@ public sealed class LauncherServiceTests
 
         Assert.True(result.Success);
         Assert.Equal("https://example.com", starter.StartedPaths.Single());
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void Launch_UsesUrlFileWhenResolvedTargetIsMissing(string? resolvedTargetPath)
+    {
+        FakeProcessStarter starter = new();
+        LauncherService service = new(starter, path => false, path => false);
+        LaunchItem item = new(
+            "desktop:site",
+            "Site",
+            LaunchItemSource.DesktopScan,
+            LaunchItemKind.Url,
+            @"C:\Users\hp\Desktop\Site.url",
+            resolvedTargetPath,
+            "Site.url",
+            DateTimeOffset.UtcNow);
+
+        LaunchResult result = service.Launch(item);
+
+        Assert.True(result.Success);
+        Assert.Equal(@"C:\Users\hp\Desktop\Site.url", starter.StartedPaths.Single());
+    }
+
+    [Fact]
+    public void Launch_UsesShellExecuteForExistingFolder()
+    {
+        FakeProcessStarter starter = new();
+        LauncherService service = new(starter, path => false, path => true);
+        LaunchItem item = LaunchItem.CreateManual("Folder", LaunchItemKind.Folder, @"C:\Users\hp\Documents");
+
+        LaunchResult result = service.Launch(item);
+
+        Assert.True(result.Success);
+        Assert.Equal(@"C:\Users\hp\Documents", starter.StartedPaths.Single());
     }
 
     [Fact]

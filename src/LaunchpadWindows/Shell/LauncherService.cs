@@ -50,6 +50,7 @@ public sealed class LauncherService : ILauncher
 
         if (item.Kind == LaunchItemKind.Shortcut &&
             !string.IsNullOrWhiteSpace(item.ResolvedTargetPath) &&
+            LooksLikeLocalFileSystemPath(item.ResolvedTargetPath) &&
             !_fileExists(item.ResolvedTargetPath) &&
             !_directoryExists(item.ResolvedTargetPath))
         {
@@ -70,5 +71,23 @@ public sealed class LauncherService : ILauncher
         {
             return LaunchResult.Fail(ex.Message);
         }
+    }
+
+    private static bool LooksLikeLocalFileSystemPath(string path)
+    {
+        if (path.StartsWith(@"\\", StringComparison.Ordinal) || path.StartsWith("//", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        return path.Length >= 3 &&
+            char.IsLetter(path[0]) &&
+            path[1] == ':' &&
+            IsDirectorySeparator(path[2]);
+    }
+
+    private static bool IsDirectorySeparator(char character)
+    {
+        return character is '\\' or '/';
     }
 }
