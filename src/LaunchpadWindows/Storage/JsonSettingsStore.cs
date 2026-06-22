@@ -1,4 +1,5 @@
 using System.IO;
+using System.Globalization;
 using System.Text.Json;
 using LaunchpadWindows.Models;
 
@@ -32,17 +33,19 @@ public sealed class JsonSettingsStore
 
         try
         {
-            await using FileStream stream = File.OpenRead(_settingsPath);
-            AppSettings? settings = await JsonSerializer.DeserializeAsync<AppSettings>(stream, Options, cancellationToken);
-            return settings ?? AppSettings.CreateDefault();
+            AppSettings? settings;
+            await using (FileStream stream = File.OpenRead(_settingsPath))
+            {
+                settings = await JsonSerializer.DeserializeAsync<AppSettings>(stream, Options, cancellationToken);
+            }
+
+            return IsValid(settings)
+                ? settings!
+                : await RecoverDefaultsAsync(cancellationToken);
         }
         catch (JsonException)
         {
-            string backupPath = $"{_settingsPath}.corrupt-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}";
-            File.Move(_settingsPath, backupPath, overwrite: false);
-            AppSettings defaults = AppSettings.CreateDefault();
-            await SaveAsync(defaults, cancellationToken);
-            return defaults;
+            return await RecoverDefaultsAsync(cancellationToken);
         }
     }
 
@@ -62,5 +65,35 @@ public sealed class JsonSettingsStore
     {
         string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
         return Path.Combine(appData, "LaunchpadWindows", "settings.json");
+    }
+
+    private async Task<AppSettings> RecoverDefaultsAsync(CancellationToken cancellationToken)
+    {
+        File.Move(_settingsPath, GetCorruptBackupPath(), overwrite: false);
+        AppSettings defaults = AppSettings.CreateDefault();
+        await SaveAsync(defaults, cancellationToken);
+        return defaults;
+    }
+
+    private string GetCorruptBackupPath()
+    {
+        string ticks = DateTimeOffset.UtcNow.UtcTicks.ToString(CultureInfo.InvariantCulture);
+        string backupPath = $"{_settingsPath}.corrupt-{ticks}";
+
+        for (int attempt = 1; File.Exists(backupPath); attempt++)
+        {
+            backupPath = $"{_settingsPath}.corrupt-{ticks}-{attempt.ToString(CultureInfo.InvariantCulture)}";
+        }
+
+        return backupPath;
+    }
+
+    private static bool IsValid(AppSettings? settings)
+    {
+        return settings is not null
+            && settings.Hotkey is not null
+            && settings.OrderedItemIds is not null
+            && settings.ManualItems is not null
+            && settings.HiddenDesktopItemIds is not null;
     }
 }
