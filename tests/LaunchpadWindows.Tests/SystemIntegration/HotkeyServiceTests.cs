@@ -71,17 +71,60 @@ public sealed class HotkeyServiceTests
         Assert.Equal(new[] { "Register:0", "Unregister:0", "Register:0" }, registrar.Calls);
     }
 
+    [Fact]
+    public void Register_MapsDigitKeyTextToDigitVirtualKey()
+    {
+        FakeHotkeyRegistrar registrar = new(true);
+        HotkeyService service = new(registrar);
+
+        HotkeyRegistrationResult result = service.Register(nint.Zero, new HotkeyGesture(Control: true, Alt: true, Shift: false, Windows: false, Key: "1"));
+
+        Assert.True(result.Success);
+        Assert.Equal(49, registrar.LastVirtualKey);
+    }
+
+    [Fact]
+    public void Register_ReturnsInvalidWithoutModifier()
+    {
+        FakeHotkeyRegistrar registrar = new(true);
+        HotkeyService service = new(registrar);
+
+        HotkeyRegistrationResult result = service.Register(nint.Zero, new HotkeyGesture(false, false, false, false, "L"));
+
+        Assert.False(result.Success);
+        Assert.Equal(0, registrar.RegisterCount);
+    }
+
+    [Fact]
+    public void HandleHotkeyMessage_DoesNotRaiseActivatedAfterUnregister()
+    {
+        FakeHotkeyRegistrar registrar = new(true);
+        HotkeyService service = new(registrar);
+        int activations = 0;
+        service.Activated += (_, _) => activations++;
+        service.Register(nint.Zero, HotkeyGesture.Default);
+        service.Unregister();
+
+        service.HandleHotkeyMessage(HotkeyService.WmHotkey, HotkeyService.DefaultHotkeyId);
+
+        Assert.Equal(0, activations);
+    }
+
     private sealed class FakeHotkeyRegistrar(params bool[] registerResults) : IHotkeyRegistrar
     {
         private int _nextResult;
         public int RegisterCount { get; private set; }
         public int UnregisterCount { get; private set; }
+        public HotkeyModifiers LastModifiers { get; private set; }
+        public int LastVirtualKey { get; private set; }
         public List<string> Calls { get; } = [];
 
         public bool Register(nint windowHandle, int id, HotkeyModifiers modifiers, int virtualKey)
         {
             Calls.Add($"Register:{windowHandle}");
             RegisterCount++;
+            LastModifiers = modifiers;
+            LastVirtualKey = virtualKey;
             bool result = registerResults[Math.Min(_nextResult, registerResults.Length - 1)];
             _nextResult++;
             return result;

@@ -96,7 +96,7 @@ public sealed class HotkeyService
 
     public void HandleHotkeyMessage(int message, int id)
     {
-        if (message == WmHotkey && id == DefaultHotkeyId)
+        if (_isRegistered && message == WmHotkey && id == DefaultHotkeyId)
         {
             Activated?.Invoke(this, EventArgs.Empty);
         }
@@ -133,16 +133,56 @@ public sealed class HotkeyService
     {
         modifiers = 0;
         virtualKey = 0;
-        if (!Enum.TryParse(gesture.Key, ignoreCase: true, out Key key))
-        {
-            return false;
-        }
-
         if (gesture.Control) modifiers |= HotkeyModifiers.Control;
         if (gesture.Alt) modifiers |= HotkeyModifiers.Alt;
         if (gesture.Shift) modifiers |= HotkeyModifiers.Shift;
         if (gesture.Windows) modifiers |= HotkeyModifiers.Windows;
-        virtualKey = KeyInterop.VirtualKeyFromKey(key);
+
+        if (modifiers == 0)
+        {
+            return false;
+        }
+
+        if (!TryGetVirtualKey(gesture.Key, out virtualKey))
+        {
+            return false;
+        }
+
         return virtualKey != 0;
+    }
+
+    private static bool TryGetVirtualKey(string keyText, out int virtualKey)
+    {
+        virtualKey = 0;
+        string normalizedKey = keyText.Trim();
+        if (normalizedKey.Length == 1)
+        {
+            char keyChar = normalizedKey[0];
+            if (keyChar is >= '0' and <= '9')
+            {
+                virtualKey = keyChar;
+                return true;
+            }
+
+            char upperKeyChar = char.ToUpperInvariant(keyChar);
+            if (upperKeyChar is >= 'A' and <= 'Z')
+            {
+                virtualKey = upperKeyChar;
+                return true;
+            }
+        }
+
+        if (normalizedKey.All(char.IsDigit))
+        {
+            return false;
+        }
+
+        if (!Enum.TryParse(normalizedKey, ignoreCase: true, out Key key))
+        {
+            return false;
+        }
+
+        virtualKey = KeyInterop.VirtualKeyFromKey(key);
+        return true;
     }
 }
