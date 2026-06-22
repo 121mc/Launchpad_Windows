@@ -46,6 +46,7 @@ public sealed class HotkeyService
     public const int DefaultHotkeyId = 0x4C50;
 
     private readonly IHotkeyRegistrar _registrar;
+    private bool _isRegistered;
     private nint _windowHandle;
     private HotkeyGesture? _registeredGesture;
 
@@ -65,29 +66,31 @@ public sealed class HotkeyService
 
         nint previousHandle = _windowHandle;
         HotkeyGesture? previousGesture = _registeredGesture;
-        if (_windowHandle != nint.Zero)
+        bool wasRegistered = _isRegistered;
+        if (_isRegistered)
         {
             _registrar.Unregister(_windowHandle, DefaultHotkeyId);
+            ClearRegistration();
         }
 
         if (_registrar.Register(windowHandle, DefaultHotkeyId, modifiers, virtualKey))
         {
             _windowHandle = windowHandle;
             _registeredGesture = gesture;
+            _isRegistered = true;
             return HotkeyRegistrationResult.Ok();
         }
 
-        RestorePreviousRegistration(previousHandle, previousGesture);
+        RestorePreviousRegistration(wasRegistered, previousHandle, previousGesture);
         return HotkeyRegistrationResult.Conflict();
     }
 
     public void Unregister()
     {
-        if (_windowHandle != nint.Zero)
+        if (_isRegistered)
         {
             _registrar.Unregister(_windowHandle, DefaultHotkeyId);
-            _windowHandle = nint.Zero;
-            _registeredGesture = null;
+            ClearRegistration();
         }
     }
 
@@ -99,12 +102,11 @@ public sealed class HotkeyService
         }
     }
 
-    private void RestorePreviousRegistration(nint previousHandle, HotkeyGesture? previousGesture)
+    private void RestorePreviousRegistration(bool wasRegistered, nint previousHandle, HotkeyGesture? previousGesture)
     {
-        if (previousHandle == nint.Zero || previousGesture is null)
+        if (!wasRegistered || previousGesture is null)
         {
-            _windowHandle = nint.Zero;
-            _registeredGesture = null;
+            ClearRegistration();
             return;
         }
 
@@ -113,7 +115,18 @@ public sealed class HotkeyService
         {
             _windowHandle = previousHandle;
             _registeredGesture = previousGesture;
+            _isRegistered = true;
+            return;
         }
+
+        ClearRegistration();
+    }
+
+    private void ClearRegistration()
+    {
+        _isRegistered = false;
+        _windowHandle = nint.Zero;
+        _registeredGesture = null;
     }
 
     private static bool TryBuildRegistration(HotkeyGesture gesture, out HotkeyModifiers modifiers, out int virtualKey)

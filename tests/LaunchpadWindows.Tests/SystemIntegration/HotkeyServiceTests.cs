@@ -45,14 +45,42 @@ public sealed class HotkeyServiceTests
         Assert.Equal(1, registrar.UnregisterCount);
     }
 
+    [Fact]
+    public void Unregister_UnregistersZeroHandleRegistration()
+    {
+        FakeHotkeyRegistrar registrar = new(true);
+        HotkeyService service = new(registrar);
+        service.Register(nint.Zero, HotkeyGesture.Default);
+
+        service.Unregister();
+
+        Assert.Equal(1, registrar.UnregisterCount);
+    }
+
+    [Fact]
+    public void Register_UnregistersZeroHandleRegistrationBeforeReplacing()
+    {
+        FakeHotkeyRegistrar registrar = new(true, true);
+        HotkeyService service = new(registrar);
+        service.Register(nint.Zero, HotkeyGesture.Default);
+
+        HotkeyRegistrationResult result = service.Register(nint.Zero, new HotkeyGesture(Control: true, Alt: true, Shift: false, Windows: false, Key: "L"));
+
+        Assert.True(result.Success);
+        Assert.Equal(1, registrar.UnregisterCount);
+        Assert.Equal(new[] { "Register:0", "Unregister:0", "Register:0" }, registrar.Calls);
+    }
+
     private sealed class FakeHotkeyRegistrar(params bool[] registerResults) : IHotkeyRegistrar
     {
         private int _nextResult;
         public int RegisterCount { get; private set; }
         public int UnregisterCount { get; private set; }
+        public List<string> Calls { get; } = [];
 
         public bool Register(nint windowHandle, int id, HotkeyModifiers modifiers, int virtualKey)
         {
+            Calls.Add($"Register:{windowHandle}");
             RegisterCount++;
             bool result = registerResults[Math.Min(_nextResult, registerResults.Length - 1)];
             _nextResult++;
@@ -61,6 +89,7 @@ public sealed class HotkeyServiceTests
 
         public void Unregister(nint windowHandle, int id)
         {
+            Calls.Add($"Unregister:{windowHandle}");
             UnregisterCount++;
         }
     }
