@@ -16,6 +16,7 @@ namespace LaunchpadWindows;
 public partial class App : System.Windows.Application
 {
     private JsonSettingsStore _settingsStore = null!;
+    private SettingsPersistenceGuard _settingsPersistence = null!;
     private AppSettings _settings = null!;
     private TrayService _tray = null!;
     private HotkeyService _hotkey = null!;
@@ -30,10 +31,19 @@ public partial class App : System.Windows.Application
         base.OnStartup(e);
 
         _settingsStore = new JsonSettingsStore(JsonSettingsStore.GetDefaultSettingsPath());
-        _settings = await _settingsStore.LoadAsync();
+        SettingsLoadResult loadResult = await SettingsPersistenceGuard.LoadOrDefaultsAsync(_settingsStore.LoadAsync);
+        _settings = loadResult.Settings;
 
         _hotkey = new HotkeyService(new NativeHotkeyRegistrar());
         _tray = new TrayService(OpenLaunchpad, OpenSettings, Shutdown);
+        _settingsPersistence = new SettingsPersistenceGuard(
+            cancellationToken => _settingsStore.SaveAsync(_settings, cancellationToken),
+            message => _tray.ShowMessage("Launchpad Windows", message));
+
+        if (!string.IsNullOrWhiteSpace(loadResult.ErrorMessage))
+        {
+            _tray.ShowMessage("Launchpad Windows", loadResult.ErrorMessage);
+        }
 
         HwndSourceParameters parameters = new("LaunchpadWindowsHotkeySink");
         _messageSource = new HwndSource(parameters);
@@ -89,13 +99,14 @@ public partial class App : System.Windows.Application
         _isOpeningLaunchpad = true;
         try
         {
+            MonitorBounds bounds = new MonitorService().GetMouseMonitorBounds();
             string desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
             DesktopScanResult scan = ScanDesktopOrReport(desktopPath);
             IReadOnlyList<LaunchItem> items;
             if (scan.Success)
             {
                 items = ItemMerger.Merge(_settings, scan.Items);
-                await _settingsStore.SaveAsync(_settings);
+                await _settingsPersistence.TrySaveAsync("Launchpad items");
             }
             else
             {
@@ -109,18 +120,12 @@ public partial class App : System.Windows.Application
                 viewModel.OrderChanged += async (_, ids) =>
                 {
                     _settings.OrderedItemIds = ids.ToList();
-                    await _settingsStore.SaveAsync(_settings);
+                    await _settingsPersistence.TrySaveAsync("Launchpad order");
                 };
             }
 
-            Rect bounds = new MonitorService().GetMouseMonitorBounds();
-            LaunchpadWindow window = new(viewModel, _settings.FadeDuration)
-            {
-                Left = bounds.Left,
-                Top = bounds.Top,
-                Width = bounds.Width,
-                Height = bounds.Height
-            };
+            LaunchpadWindow window = new(viewModel, _settings.FadeDuration);
+            window.SetPhysicalBounds(bounds);
             viewModel.CloseRequested += (_, _) => window.FadeOutAndClose();
             window.Closed += (_, _) =>
             {
@@ -151,7 +156,7 @@ public partial class App : System.Windows.Application
             scan.Items,
             RegisterHotkeyFromSettings,
             new ShellShortcutResolver());
-        viewModel.SaveRequested += async (_, _) => await _settingsStore.SaveAsync(_settings);
+        viewModel.SaveRequested += async (_, _) => await _settingsPersistence.TrySaveAsync("Settings");
         new SettingsWindow(viewModel).Show();
     }
 

@@ -3369,7 +3369,7 @@ git commit -m "feat: add icon extraction helper and visual polish"
 **Files:**
 - Modify: `docs/superpowers/plans/2026-06-22-launchpad-windows.md`
 
-Execution note (2026-06-23): Codex ran the automated suite successfully (`70` tests), published the Release `win-x64` framework-dependent build successfully, and smoke-started both Debug and Release executables before stopping them to avoid leaving a background tray process. Interactive tray menu, hotkey, Desktop fixture, drag reorder, settings/autostart, multi-monitor, display scaling, and visual layout checks remain for hands-on desktop verification.
+Execution note (2026-06-23): Codex ran the automated suite successfully (`74` tests), published the Release `win-x64` framework-dependent build successfully, and smoke-started both Debug and Release executables before stopping them to avoid leaving a background tray process. Code review follow-up added guarded settings persistence and physical monitor bounds placement for mixed-DPI layouts. Interactive tray menu, hotkey, Desktop fixture, drag reorder, settings/autostart, multi-monitor, display scaling, and visual layout checks remain for hands-on desktop verification.
 
 - [x] **Step 1: Run the full automated test suite**
 
