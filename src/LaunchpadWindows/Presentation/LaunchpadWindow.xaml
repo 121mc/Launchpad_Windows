@@ -4,11 +4,13 @@
         xmlns:models="clr-namespace:LaunchpadWindows.Models"
         xmlns:local="clr-namespace:LaunchpadWindows.Presentation"
         WindowStyle="None"
+        AllowsTransparency="True"
         ResizeMode="NoResize"
         Topmost="True"
         ShowInTaskbar="False"
         Background="Transparent"
         Opacity="0"
+        Focusable="True"
         KeyDown="OnKeyDown">
     <Window.Resources>
         <local:LaunchItemIconConverter x:Key="LaunchItemIconConverter" />
@@ -21,7 +23,7 @@
             <Setter Property="Foreground" Value="White" />
         </Style>
     </Window.Resources>
-    <Grid x:Name="BackgroundSurface" Background="#66000000" MouseDown="OnWindowMouseDown">
+    <Grid x:Name="BackgroundSurface" Background="#88111111" MouseDown="OnWindowMouseDown">
         <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto" Padding="24">
             <ItemsControl x:Name="ItemsHost" ItemsSource="{Binding Items}" HorizontalAlignment="Center" VerticalAlignment="Center">
                 <ItemsControl.ItemsPanel>
@@ -35,11 +37,12 @@
                                 Command="{Binding DataContext.LaunchCommand, RelativeSource={RelativeSource AncestorType=Window}}"
                                 CommandParameter="{Binding}"
                                 AllowDrop="True"
+                                PreviewMouseLeftButtonDown="OnItemPreviewMouseLeftButtonDown"
                                 PreviewMouseMove="OnItemPreviewMouseMove"
                                 Drop="OnItemDrop">
                             <StackPanel>
-                                <Border Width="72" Height="72" CornerRadius="18" Background="#33FFFFFF" HorizontalAlignment="Center">
-                                    <Image Source="{Binding Converter={StaticResource LaunchItemIconConverter}}" Width="54" Height="54" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                <Border Width="80" Height="80" CornerRadius="18" Background="#33FFFFFF" HorizontalAlignment="Center">
+                                    <Image Source="{Binding Converter={StaticResource LaunchItemIconConverter}}" Width="64" Height="64" RenderOptions.BitmapScalingMode="HighQuality" HorizontalAlignment="Center" VerticalAlignment="Center" />
                                 </Border>
                                 <TextBlock Text="{Binding DisplayName}" Margin="0,10,0,0" TextAlignment="Center" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" LineHeight="18" MaxHeight="36" Width="100" />
                             </StackPanel>

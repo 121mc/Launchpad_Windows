@@ -45,7 +45,16 @@ public partial class App : System.Windows.Application
             _tray.ShowMessage("Launchpad Windows", loadResult.ErrorMessage);
         }
 
-        HwndSourceParameters parameters = new("LaunchpadWindowsHotkeySink");
+        HwndSourceParameters parameters = new("LaunchpadWindowsHotkeySink")
+        {
+            Width = 0,
+            Height = 0,
+            PositionX = -100,
+            PositionY = -100,
+            WindowStyle = 0,          // WS_OVERLAPPED – invisible message sink
+            ExtendedWindowStyle = 0,
+            ParentWindow = new nint(-3) // HWND_MESSAGE – message-only window
+        };
         _messageSource = new HwndSource(parameters);
         _messageSource.AddHook(OnWindowMessage);
         HotkeyRegistrationResult hotkeyResult = _hotkey.Register(_messageSource.Handle, _settings.Hotkey);

@@ -36,6 +36,8 @@ public partial class LaunchpadWindow : Window
         {
             AcrylicWindowHelper.Apply(this);
             FadeTo(1.0);
+            Keyboard.Focus(this);
+            Focus();
         };
     }
 
@@ -100,12 +102,32 @@ public partial class LaunchpadWindow : Window
         e.Handled = true;
     }
 
+    private System.Windows.Point? _dragStartPoint;
+
+    private void OnItemPreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        _dragStartPoint = e.GetPosition(null);
+    }
+
     private void OnItemPreviewMouseMove(object sender, WpfMouseEventArgs e)
     {
-        if (e.LeftButton == MouseButtonState.Pressed && sender is FrameworkElement { DataContext: LaunchItem item } element)
+        if (e.LeftButton != MouseButtonState.Pressed ||
+            _dragStartPoint is not { } startPoint ||
+            sender is not FrameworkElement { DataContext: LaunchItem item } element)
         {
-            System.Windows.DragDrop.DoDragDrop(element, item, System.Windows.DragDropEffects.Move);
+            return;
         }
+
+        System.Windows.Point currentPosition = e.GetPosition(null);
+        Vector diff = startPoint - currentPosition;
+        if (Math.Abs(diff.X) < SystemParameters.MinimumHorizontalDragDistance &&
+            Math.Abs(diff.Y) < SystemParameters.MinimumVerticalDragDistance)
+        {
+            return;
+        }
+
+        _dragStartPoint = null;
+        System.Windows.DragDrop.DoDragDrop(element, item, System.Windows.DragDropEffects.Move);
     }
 
     private void OnItemDrop(object sender, WpfDragEventArgs e)
