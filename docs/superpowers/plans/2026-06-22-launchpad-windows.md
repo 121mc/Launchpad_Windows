@@ -3369,7 +3369,9 @@ git commit -m "feat: add icon extraction helper and visual polish"
 **Files:**
 - Modify: `docs/superpowers/plans/2026-06-22-launchpad-windows.md`
 
-- [ ] **Step 1: Run the full automated test suite**
+Execution note (2026-06-23): Codex ran the automated suite successfully (`70` tests), published the Release `win-x64` framework-dependent build successfully, and smoke-started both Debug and Release executables before stopping them to avoid leaving a background tray process. Interactive tray menu, hotkey, Desktop fixture, drag reorder, settings/autostart, multi-monitor, display scaling, and visual layout checks remain for hands-on desktop verification.
+
+- [x] **Step 1: Run the full automated test suite**
 
 Run:
 
@@ -3628,7 +3630,7 @@ Remove-Item -LiteralPath $manifestPath -Force
 
 Expected: temporary verification entries are removed from the user Desktop.
 
-- [ ] **Step 10: Publish release build**
+- [x] **Step 10: Publish release build**
 
 Run:
 
@@ -3638,7 +3640,7 @@ dotnet publish src/LaunchpadWindows/LaunchpadWindows.csproj -c Release -r win-x6
 
 Expected: publish succeeds and creates output under `src/LaunchpadWindows/bin/Release/net10.0-windows/win-x64/publish`.
 
-- [ ] **Step 11: Commit verification notes**
+- [x] **Step 11: Commit verification notes**
 
 Update this task's checklist in `docs/superpowers/plans/2026-06-22-launchpad-windows.md` as executed, then run:
 
