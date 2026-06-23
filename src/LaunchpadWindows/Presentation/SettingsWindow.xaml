@@ -1,0 +1,56 @@
+<Window x:Class="LaunchpadWindows.Presentation.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Launchpad Windows Settings"
+        Width="720"
+        Height="520"
+        WindowStartupLocation="CenterScreen">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+        <StackPanel Orientation="Horizontal">
+            <TextBlock Text="Hotkey" FontWeight="SemiBold" Width="120" />
+            <TextBox x:Name="HotkeyTextBox" Text="{Binding HotkeyText, Mode=OneWay}" Width="220" />
+            <Button Content="Apply" Width="80" Margin="8,0,0,0" Click="OnApplyHotkeyClick" />
+        </StackPanel>
+        <CheckBox x:Name="AutostartCheckBox"
+                  Grid.Row="1"
+                  Content="Start at login"
+                  IsChecked="{Binding AutostartEnabled, Mode=OneWay}"
+                  Margin="120,16,0,0"
+                  Click="OnAutostartClick" />
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,16,0,0">
+            <TextBlock Text="Desktop" FontWeight="SemiBold" Width="120" />
+            <TextBlock Text="{Binding DesktopPath}" TextTrimming="CharacterEllipsis" />
+        </StackPanel>
+        <TextBlock Grid.Row="3" Text="{Binding ErrorMessage}" Foreground="#B00020" Margin="120,12,0,0" />
+        <StackPanel Grid.Row="4" Orientation="Horizontal" Margin="0,16,0,0">
+            <Button Content="Add File Or Shortcut" Width="150" Click="OnAddFileClick" />
+            <Button Content="Add Folder" Width="110" Margin="8,0,0,0" Click="OnAddFolderClick" />
+            <Button Content="Remove Manual" Width="130" Margin="8,0,0,0" Click="OnRemoveManualClick" />
+        </StackPanel>
+        <TabControl Grid.Row="5" Margin="0,20,0,0">
+            <TabItem Header="Manual Items">
+                <ListBox x:Name="ManualItemsList" ItemsSource="{Binding ManualItems}" DisplayMemberPath="DisplayName" />
+            </TabItem>
+            <TabItem Header="Desktop Items">
+                <DockPanel>
+                    <Button DockPanel.Dock="Bottom" Content="Hide Selected Desktop Item" Height="32" Margin="0,8,0,0" Click="OnHideDesktopClick" />
+                    <ListBox x:Name="DesktopItemsList" ItemsSource="{Binding VisibleDesktopItems}" DisplayMemberPath="DisplayName" />
+                </DockPanel>
+            </TabItem>
+            <TabItem Header="Hidden Desktop Items">
+                <DockPanel>
+                    <Button DockPanel.Dock="Bottom" Content="Restore Selected" Height="32" Margin="0,8,0,0" Click="OnRestoreHiddenClick" />
+                    <ListBox x:Name="HiddenItemsList" ItemsSource="{Binding HiddenDesktopItemIds}" />
+                </DockPanel>
+            </TabItem>
+        </TabControl>
+    </Grid>
+</Window>
